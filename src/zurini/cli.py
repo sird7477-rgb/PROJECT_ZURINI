@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_backtest_command(args)
     if args.command == "load-sample":
         return run_load_sample_command(args)
+    if args.command == "backtest-csv":
+        return run_backtest_csv_command(args)
     parser.print_help()
     return 2
 
@@ -59,6 +61,14 @@ def _build_parser() -> argparse.ArgumentParser:
     load_sample.add_argument("--source", default="sample")
     load_sample.add_argument("--output-dir", type=Path, default=Path("reports/sample"))
     load_sample.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
+
+    backtest_csv = subparsers.add_parser("backtest-csv", help="run a backtest from Daishin/CYBOS minute CSV files")
+    backtest_csv.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    backtest_csv.add_argument("--path", type=Path, action="append", required=True)
+    backtest_csv.add_argument("--symbol", action="append", help="symbol override matching each --path; defaults to file stems")
+    backtest_csv.add_argument("--source", default="sample")
+    backtest_csv.add_argument("--output-dir", type=Path, default=Path("reports/sample-backtest"))
+    backtest_csv.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
     return parser
 
 
@@ -117,6 +127,50 @@ def run_load_sample_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_backtest_csv_command(args: argparse.Namespace) -> int:
+    config = load_config(args.config, output_dir=args.output_dir)
+    symbols = _csv_symbols(args.path, args.symbol)
+    bars: list[Bar] = []
+    quality_reports = []
+    for path, symbol in zip(args.path, symbols, strict=True):
+        loaded = load_daishin_minute_csv(path, symbol=symbol, source=args.source)
+        bars.extend(loaded)
+        quality_reports.append(build_csv_quality_report(loaded, source_path=path, symbol=symbol, source=args.source))
+
+    if args.keep_db:
+        db.apply_schema()
+    else:
+        db.reset_market_bars()
+    inserted = db.insert_bars(bars)
+
+    loaded_from_db: list[Bar] = []
+    for symbol in symbols:
+        loaded_from_db.extend(db.fetch_bars(symbol))
+
+    report, trades = run_backtest(loaded_from_db, config=config.backtest)
+    outputs = write_backtest_outputs(
+        report=report,
+        trades=trades,
+        output_dir=args.output_dir,
+        symbols=symbols,
+        inserted_rows=inserted,
+        title="PROJECT_ZURINI phase-1 CSV sample backtest",
+    )
+    quality_path = args.output_dir / "csv-quality.json"
+    quality_path.write_text(
+        json.dumps([item.as_dict() for item in quality_reports], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"symbols={','.join(symbols)}")
+    print(f"inserted_rows={inserted}")
+    print(f"trade_count={report.trade_count}")
+    print(f"net_pnl={report.net_pnl}")
+    print(f"report={outputs['json']}")
+    print(f"quality_report={quality_path}")
+    return 0
+
+
 def load_config(path: Path, *, output_dir: Path | None = None) -> Phase1Config:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     dummy = raw.get("dummy", {})
@@ -161,6 +215,14 @@ def generate_configured_dummy_bars(config: DummyConfig) -> list[Bar]:
 
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
+
+
+def _csv_symbols(paths: list[Path], symbols: list[str] | None) -> list[str]:
+    if symbols is None:
+        return [path.stem for path in paths]
+    if len(symbols) != len(paths):
+        raise ValueError("--symbol count must match --path count")
+    return symbols
 
 
 if __name__ == "__main__":

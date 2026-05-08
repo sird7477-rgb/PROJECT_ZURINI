@@ -75,3 +75,22 @@ def test_load_sample_cli_inserts_csv_and_writes_quality_report(tmp_path):
     assert payload["row_count"] == 4208
     assert payload["inserted_rows"] == 4208
     assert len(db.fetch_bars("A000020")) == 4208
+
+
+@pytest.mark.integration
+def test_backtest_csv_cli_runs_sample_through_existing_engine(tmp_path):
+    output_dir = tmp_path / "sample-backtest"
+
+    exit_code = main(["backtest-csv", "--path", "sample/A000020.csv", "--output-dir", str(output_dir)])
+
+    assert exit_code == 0
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    quality = json.loads((output_dir / "csv-quality.json").read_text(encoding="utf-8"))
+    summary = (output_dir / "summary.txt").read_text(encoding="utf-8")
+
+    assert report["symbols"] == ["A000020"]
+    assert report["inserted_rows"] == 4208
+    assert "trade_count" in report["report"]
+    assert quality[0]["symbol"] == "A000020"
+    assert quality[0]["row_count"] == 4208
+    assert "PROJECT_ZURINI phase-1 CSV sample backtest" in summary

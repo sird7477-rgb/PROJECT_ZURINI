@@ -17,6 +17,7 @@ def write_backtest_outputs(
     output_dir: Path,
     symbols: list[str],
     inserted_rows: int,
+    title: str = "PROJECT_ZURINI phase-1 dummy multi-symbol backtest",
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -26,7 +27,7 @@ def write_backtest_outputs(
     }
     _write_report_json(paths["json"], report, trades, symbols, inserted_rows)
     _write_trades_csv(paths["csv"], trades)
-    _write_summary_txt(paths["txt"], report, symbols, inserted_rows)
+    _write_summary_txt(paths["txt"], report, symbols, inserted_rows, title)
     return paths
 
 
@@ -70,9 +71,10 @@ def _write_summary_txt(
     report: BacktestReport,
     symbols: list[str],
     inserted_rows: int,
+    title: str,
 ) -> None:
     lines = [
-        "PROJECT_ZURINI phase-1 dummy multi-symbol backtest",
+        title,
         f"symbols: {', '.join(symbols)}",
         f"inserted_rows: {inserted_rows}",
         f"trade_count: {report.trade_count}",
