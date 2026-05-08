@@ -59,6 +59,7 @@ and `./scripts/verify.sh` is kept current.
 
 Before implementing trading logic, extract phase-1-relevant rules from `(old)/`
 into current docs or code comments/tests.
+The active extraction lives in `docs/phase-1-baseline.md`.
 
 Required source themes:
 

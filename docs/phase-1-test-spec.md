@@ -38,6 +38,7 @@ Required now and throughout phase 1:
 - `docs/phase-1-development.md` exists.
 - `docs/phase-1-prd.md` exists.
 - `docs/phase-1-test-spec.md` exists.
+- `docs/phase-1-baseline.md` exists.
 - docs state that phase-1 trading conditions, sequence, risk controls, and
   architecture start from `(old)/`.
 - docs state that `(old)/` is a starting baseline, not an absolute constraint.
@@ -59,6 +60,9 @@ Required now and throughout phase 1:
   - Universal Quant Core
 - direction changes from old-document assumptions must be documented in current
   docs before implementation depends on them.
+- active extracted rules cover VWAP first-pullback, beta throttling,
+  blacklist/heartbeat entry blocking, DB-backed 1-minute bars, and a friction
+  layer.
 
 ### 3. Postgres Availability
 

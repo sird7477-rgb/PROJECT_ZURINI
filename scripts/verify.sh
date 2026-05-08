@@ -49,6 +49,10 @@ require_file "docs/WORKFLOW.md"
 require_file "docs/phase-1-development.md"
 require_file "docs/phase-1-prd.md"
 require_file "docs/phase-1-test-spec.md"
+require_file "docs/phase-1-baseline.md"
+require_file "pyproject.toml"
+require_file "docker-compose.yml"
+require_file "src/zurini/data/schema.sql"
 require_file "scripts/review-gate.sh"
 require_file "(old)/# [자동매매 전략 기획서].md"
 require_file "(old)/# [자동매매 전략 기획서_고도화].md"
@@ -93,6 +97,11 @@ require_text "docs/phase-1-test-spec.md" "not an absolute constraint"
 require_text "docs/phase-1-test-spec.md" "Schema Tests"
 require_text "docs/phase-1-test-spec.md" "Backtest Tests"
 require_text "docs/phase-1-test-spec.md" "Safety Tests"
+require_text "docs/phase-1-baseline.md" "VWAP first-pullback"
+require_text "docs/phase-1-baseline.md" "Global beta throttle"
+require_text "docs/phase-1-baseline.md" "Blacklist behavior"
+require_text "docs/phase-1-baseline.md" "symbol + timestamp"
+require_text "docs/phase-1-baseline.md" "friction layer"
 
 echo
 echo "[verify] checking archived old-document baseline anchors..."
@@ -103,6 +112,28 @@ require_text "(old)/# [자동매매 전략 기획서_고도화].md" "글로벌 �
 require_text "(old)/# [자동매매 플로우 차트].md" "IOC 연사 탈출"
 require_text "(old)/[자동매매_시퀀스_다이어그램].md" "Async NLP Blacklist"
 require_text "(old)/[자동매매_통합_아키텍처_설계서].md" "Universal Quant Core"
+
+echo
+echo "[verify] starting local Postgres..."
+docker compose up -d db
+for attempt in $(seq 1 30); do
+  if docker compose exec -T db pg_isready -U zurini -d zurini >/dev/null 2>&1; then
+    echo "[verify] Postgres ready"
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    fail "Postgres did not become ready"
+  fi
+  sleep 1
+done
+
+echo
+echo "[verify] running pytest..."
+if [ -x ".venv/bin/python" ]; then
+  .venv/bin/python -m pytest
+else
+  python3 -m pytest
+fi
 
 echo
 echo "[verify] success"

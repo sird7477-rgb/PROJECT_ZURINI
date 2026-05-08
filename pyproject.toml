@@ -1,0 +1,21 @@
+[project]
+name = "project-zurini"
+version = "0.1.0"
+description = "Local backtest foundation for PROJECT_ZURINI phase 1"
+requires-python = ">=3.11"
+dependencies = [
+  "psycopg[binary]>=3.2,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = [
+  "integration: tests that require Docker Compose Postgres",
+]
