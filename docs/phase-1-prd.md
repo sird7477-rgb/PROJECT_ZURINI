@@ -189,6 +189,11 @@ end_equity
 
 The report must be deterministic for the same dummy data and configuration.
 
+The phase-1 executable path must provide a local CLI that loads deterministic
+dummy multi-symbol bars into Postgres, reads them back, runs the backtest, and
+writes JSON, CSV, and text report files under `reports/` or a caller-provided
+output directory.
+
 ### 8. Safety Guardrails
 
 The phase-1 codebase must not contain real broker calls, real order placement,

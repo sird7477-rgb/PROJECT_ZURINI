@@ -132,6 +132,8 @@ Required once implementation starts:
 
 - at least one simple strategy runs end to end on dummy data.
 - multi-symbol dummy data runs end to end with deterministic aggregate reporting.
+- CLI smoke test loads dummy multi-symbol bars into Postgres, runs the backtest,
+  and writes JSON, CSV, and text report outputs.
 - report contains:
   - `trade_count`
   - `gross_pnl`
@@ -157,6 +159,8 @@ Required once implementation starts:
 Phase-1 implementation is not complete until:
 
 - `./scripts/verify.sh` exits 0.
+- `zurini backtest` or the equivalent module entrypoint can run the phase-1
+  dummy multi-symbol flow end to end.
 - failing tests identify the broken contract clearly.
 - no live-trading/API/secret behavior is introduced.
 - any degraded review-gate result is reported with reviewer status.

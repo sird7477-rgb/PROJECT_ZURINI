@@ -64,3 +64,5 @@ overrides it.
 - Keep a friction layer in the backtest engine through fee/slippage settings.
 - Produce deterministic reports with `trade_count`, `gross_pnl`, `net_pnl`,
   `max_drawdown`, `start_equity`, and `end_equity`.
+- Provide a CLI path for the phase-1 dummy multi-symbol backtest that writes
+  JSON, CSV, and text reports after loading and reading bars through Postgres.

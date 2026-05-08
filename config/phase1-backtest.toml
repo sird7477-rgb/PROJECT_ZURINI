@@ -1,0 +1,15 @@
+[dummy]
+symbols = ["ZRN001", "ZRN002", "ZRN003"]
+seed = 7477
+trading_day = "2026-01-05"
+minutes = 30
+
+[backtest]
+start_equity = "10000000"
+fee_rate = "0.00015"
+slippage_rate = "0.00050"
+profit_target = "0.03"
+hard_stop = "-0.03"
+
+[output]
+directory = "reports/phase-1"

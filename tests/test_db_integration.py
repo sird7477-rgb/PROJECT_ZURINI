@@ -20,6 +20,19 @@ def test_schema_loader_and_ordered_date_range_fetch_roundtrip():
     assert fetched[-1].timestamp == bars[7].timestamp
 
 
+def test_multi_symbol_schema_load_and_fetch_roundtrip():
+    db.reset_market_bars()
+    bars = generate_dummy_bars(symbol="ZRN001") + generate_dummy_bars(symbol="ZRN002")
+
+    assert db.insert_bars(bars) == len(bars)
+    first = db.fetch_bars("ZRN001")
+    second = db.fetch_bars("ZRN002")
+
+    assert len(first) == 30
+    assert len(second) == 30
+    assert {bar.symbol for bar in first + second} == {"ZRN001", "ZRN002"}
+
+
 def test_schema_rejects_duplicate_symbol_timestamp():
     db.reset_market_bars()
     bars = generate_dummy_bars(seed=7477)

@@ -7,6 +7,9 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
 ]
 
+[project.scripts]
+zurini = "zurini.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<9",
