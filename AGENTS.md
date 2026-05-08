@@ -7,6 +7,13 @@ The `(old)/` directory is preserved as past-history reference material. Do not
 rewrite or delete those files unless the user explicitly asks for archival
 cleanup.
 
+The `references/api/` directory is the vault for uploaded API reference
+materials. Keep API documents there until a later task promotes specific
+contracts into current docs, config, code, or tests. Do not store secrets,
+account identifiers, API keys, tokens, or credentials in this repository.
+If credentials are provided in conversation, treat them as exposed, do not echo
+or persist the values, and record only placeholder environment-variable names.
+
 For phase-1 development, use `(old)/` as the starting baseline for trading
 conditions, strategy rules, risk controls, system sequence, and architecture
 decisions. Extract current implementation requirements from those files into
@@ -49,6 +56,8 @@ Allowed without a new plan:
   behavior
 - verification script improvements
 - narrow automation reliability fixes
+- user-approved phase-2 raw market-data staging under `sample/collect_yearly/`,
+  limited to historical market data and metadata collection
 
 Not allowed without an explicit new plan:
 
@@ -56,6 +65,8 @@ Not allowed without an explicit new plan:
 - broker API integration
 - API keys, account numbers, credentials, or secret handling
 - paper trading that connects to an external broker
+- broker actions beyond historical market-data reads, including order placement,
+  account actions, or live/paper execution
 - production server deployment or cloud infrastructure
 - strategy-parameter hardcoding as a final trading recommendation
 - destructive storage changes outside disposable local test databases

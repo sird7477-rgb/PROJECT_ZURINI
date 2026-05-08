@@ -1,0 +1,6 @@
+collect_yearly.py is the maintained collector.
+
+Keep this file only as a compatibility note for the old archive layout.
+Run:
+
+  python collect_yearly.py --output-dir D:\gazuaaaaa\collect_yearly\data --months 24

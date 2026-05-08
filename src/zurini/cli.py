@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from zurini.backtest.engine import BacktestConfig, run_backtest
 from zurini.data import db
+from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
 from zurini.data.dummy import generate_dummy_bars
 from zurini.market import Bar
 from zurini.reports.files import write_backtest_outputs
@@ -36,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "backtest":
         return run_backtest_command(args)
+    if args.command == "load-sample":
+        return run_load_sample_command(args)
     parser.print_help()
     return 2
 
@@ -48,6 +52,13 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     backtest.add_argument("--output-dir", type=Path)
     backtest.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
+
+    load_sample = subparsers.add_parser("load-sample", help="load a Daishin/CYBOS minute CSV sample into Postgres")
+    load_sample.add_argument("--path", type=Path, required=True)
+    load_sample.add_argument("--symbol", help="symbol override; defaults to CSV file stem")
+    load_sample.add_argument("--source", default="sample")
+    load_sample.add_argument("--output-dir", type=Path, default=Path("reports/sample"))
+    load_sample.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
     return parser
 
 
@@ -79,6 +90,30 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     print(f"trade_count={report.trade_count}")
     print(f"net_pnl={report.net_pnl}")
     print(f"report={outputs['json']}")
+    return 0
+
+
+def run_load_sample_command(args: argparse.Namespace) -> int:
+    bars = load_daishin_minute_csv(args.path, symbol=args.symbol, source=args.source)
+    report = build_csv_quality_report(bars, source_path=args.path, symbol=args.symbol, source=args.source)
+
+    if args.keep_db:
+        db.apply_schema()
+    else:
+        db.reset_market_bars()
+    inserted = db.insert_bars(bars)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = args.output_dir / "sample-quality.json"
+    payload = report.as_dict() | {"inserted_rows": inserted}
+    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    print(f"symbol={report.symbol}")
+    print(f"inserted_rows={inserted}")
+    print(f"first_timestamp={report.first_timestamp}")
+    print(f"last_timestamp={report.last_timestamp}")
+    print(f"gap_count={report.gap_count}")
+    print(f"report={report_path}")
     return 0
 
 

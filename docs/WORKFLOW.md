@@ -28,6 +28,40 @@
 실제 과거 1분봉 데이터 취득, broker API, paper trading, live trading, 서버
 배포는 1차 범위 밖이다.
 
+업로드된 API 관련 자료는 `references/api/`에 격납한다. 이 자료들은 실제
+과거 1분봉 데이터 연동 단계에서 참고하되, 구현이 의존하는 계약은 먼저
+`docs/`, `config/`, 코드, 테스트로 승격해 기록한다.
+API 키, 토큰, 계좌번호, 비밀번호, 인증서 비밀번호 등 실제 자격증명 값은
+저장소에 기록하지 않는다. 필요한 이름만 `.env.example`과
+`references/api/credentials-inventory.md`에 placeholder로 남긴다.
+
+## 과거 데이터 수집
+
+1차는 deterministic dummy data를 기본 검증 fixture로 유지하고, `sample/`
+CSV는 실제 파일 형식이 DB 스키마에 맞게 변환될 수 있는지 확인하는 용도로
+쓴다.
+
+2차는 실제 알고리즘 검증 단계이므로 종목 1분봉만으로는 부족하다. 지수 기반
+리스크 필터를 검증하려면 KOSPI/KOSDAQ 같은 지수 1분봉과 종목 메타데이터가
+필요하다. 대신증권 CYBOS 수집기는 `sample/collect_yearly/`에 두며 장시간 raw
+data 수집을 담당한다.
+
+이 수집기는 사용자가 명시적으로 병렬 준비를 승인한 2차 raw-data staging
+도구다. 1차 백테스트 범위를 실거래/API 연동으로 확장하는 것이 아니며,
+주문 실행, 계좌 동작, 실거래 판단, broker secret 저장을 포함하지 않는다.
+CYBOS 호출은 종목/지수/메타 시장데이터 수집으로 제한한다.
+
+수집 산출물은 다음 구조를 기준으로 한다.
+
+- `minute-bars/YYYYMM/<code>.csv`
+- `index-bars/YYYYMM/<code>.csv`
+- `symbols/*.csv`
+- `manifests/*.jsonl`
+
+raw 수집 파일은 곧바로 백테스트 정답 데이터로 보지 않는다. 2차 데이터셋으로
+승격하기 전에 결측 분, 중복 `symbol + timestamp`, timezone 변환, OHLCV
+무결성, 지수/종목 시간 정렬을 별도 품질검사로 통과해야 한다.
+
 ## 작업 루프
 
 1. 요청 범위를 phase-1 목표 안에서 고정한다.

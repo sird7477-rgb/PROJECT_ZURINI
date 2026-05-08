@@ -21,6 +21,21 @@ require_text() {
   echo "[verify] anchor ok: ${path} :: ${pattern}"
 }
 
+require_absent_text() {
+  local pattern="$1"
+  if grep -R -F -q \
+    --exclude=".env" \
+    --exclude-dir=".git" \
+    --exclude-dir=".omx" \
+    --exclude-dir=".venv" \
+    --exclude-dir=".pytest_cache" \
+    --exclude-dir="__pycache__" \
+    "$pattern" .; then
+    fail "sensitive literal must not be stored in repository files"
+  fi
+  echo "[verify] sensitive literal absent"
+}
+
 require_executable_script() {
   local path="$1"
   local index_mode
@@ -50,6 +65,9 @@ require_file "docs/phase-1-development.md"
 require_file "docs/phase-1-prd.md"
 require_file "docs/phase-1-test-spec.md"
 require_file "docs/phase-1-baseline.md"
+require_file "references/api/README.md"
+require_file "references/api/credentials-inventory.md"
+require_file ".env.example"
 require_file "pyproject.toml"
 require_file "docker-compose.yml"
 require_file "config/phase1-backtest.toml"
@@ -79,6 +97,7 @@ require_text "AGENTS.md" "Docker Compose Postgres"
 require_text "docs/WORKFLOW.md" "재현 가능한 로컬 백테스트"
 require_text "docs/WORKFLOW.md" "출발 기준"
 require_text "docs/WORKFLOW.md" "절대 기준이 아니다"
+require_text "docs/WORKFLOW.md" "references/api/"
 require_text "docs/phase-1-development.md" "1분봉 데이터 스키마와 계약"
 require_text "docs/phase-1-development.md" "deterministic dummy data"
 require_text "docs/phase-1-development.md" "과거 문서 사용 원칙"
@@ -117,6 +136,22 @@ require_text "docs/phase-1-baseline.md" "multi-symbol execution"
 require_text "docs/phase-1-baseline.md" "Rationale for adding multi-symbol support"
 require_text "docs/phase-1-baseline.md" "CLI path"
 require_text "docs/phase-1-baseline.md" "JSON, CSV, and text reports"
+require_text "references/api/README.md" "API Reference Vault"
+require_text "references/api/README.md" "Do not place secrets"
+require_text "references/api/README.md" "real historical-data ingestion"
+require_text "references/api/credentials-inventory.md" "does not contain real secrets"
+require_text "references/api/credentials-inventory.md" "as exposed"
+require_text ".env.example" "GEMINI_API_KEY="
+require_text ".env.example" "KIS_LIVE_APP_SECRET="
+
+echo
+echo "[verify] checking that provided secret literals are not persisted..."
+require_absent_text "AI""za"
+require_absent_text "AAH""x3"
+require_absent_text "PSH""Slf"
+require_absent_text "PS9""KYZ"
+require_absent_text "fly""lmj"
+require_absent_text "373""69c"
 
 echo
 echo "[verify] checking archived old-document baseline anchors..."
