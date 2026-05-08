@@ -63,6 +63,15 @@ Required now and throughout phase 1:
 - active extracted rules cover VWAP first-pullback, beta throttling,
   blacklist/heartbeat entry blocking, DB-backed 1-minute bars, and a friction
   layer.
+- old-document conflicts default to the most recently saved old document, unless
+  an AI exception is documented with high-confidence reasoning.
+- conservative conflict handling applies only when saved-time evidence is
+  unavailable, tied, or still ambiguous after selecting the newest old document.
+- real historical 1-minute data acquisition is deferred until the dummy-data
+  backtest target is complete.
+- multi-symbol support is a phase-1 completion requirement because the user
+  clarified on 2026-05-09 that single-symbol backtesting is only an intermediate
+  scaffold.
 
 ### 3. Postgres Availability
 
@@ -122,6 +131,7 @@ Required once implementation starts:
 Required once implementation starts:
 
 - at least one simple strategy runs end to end on dummy data.
+- multi-symbol dummy data runs end to end with deterministic aggregate reporting.
 - report contains:
   - `trade_count`
   - `gross_pnl`

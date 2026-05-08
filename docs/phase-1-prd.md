@@ -70,11 +70,19 @@ Required source themes:
 - architecture concepts such as data interface, strategy engine, and friction
   layer
 
-If old documents conflict, prefer the more conservative rule for phase 1 and
-record the decision in `docs/`. Conservative means lower exposure, tighter risk
-limits, or skipping the trade entirely when the rule is unclear. If a later
-implementation or test result shows a better direction, update the active docs
-and tests instead of silently diverging.
+If old documents conflict, the default conflict-resolution rule is to use the
+most recently saved old document. An AI reviewer or implementer may make an
+exception only when it has high confidence and records the reasoning in current
+docs before depending on the exception. If saved-time evidence is unavailable,
+tied, or still leaves the active rule unclear, choose the more conservative rule
+for phase 1 and record the decision in `docs/`. Conservative means lower
+exposure, tighter risk limits, or skipping the trade entirely when the rule is
+unclear. If a later implementation or test result shows a better direction,
+update the active docs and tests instead of silently diverging.
+
+The phase-1 destination includes multi-symbol dummy-data backtesting. This is a
+user-confirmed scope clarification from 2026-05-09: single-symbol backtesting is
+only an intermediate scaffold, not the final phase-1 completion point.
 
 ### 2. Postgres Schema
 
@@ -203,7 +211,8 @@ Phase 1 is complete when:
 
 ## Deferred Decisions
 
-- Actual historical data vendor/source
+- Actual historical data vendor/source. Real 1-minute historical data
+  acquisition starts after the dummy-data backtest target is complete.
 - Adjusted vs raw price storage split
 - Trading halt representation
 - Corporate action handling

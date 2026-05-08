@@ -5,6 +5,14 @@ The archived files remain preserved history. This baseline is the starting point
 not an immutable specification; deliberate changes must be recorded here or in
 the PRD/test spec before implementation depends on them.
 
+When old documents conflict, use the most recently saved old document as the
+default source. An AI reviewer or implementer may make an exception only when it
+has high confidence and records the reasoning in current docs before depending
+on the exception.
+If saved-time evidence is unavailable or tied, choose the more conservative
+interpretation until the user or a documented high-confidence AI judgment
+overrides it.
+
 ## Strategy Baseline
 
 - Primary phase-1 strategy shape: day-trading VWAP first-pullback.
@@ -31,6 +39,9 @@ the PRD/test spec before implementation depends on them.
 ## Data And Sequence Baseline
 
 - Postgres is the source of 1-minute historical bars for backtest execution.
+- Phase 1 uses deterministic dummy 1-minute bars until the dummy-data backtest
+  target is complete. Real historical 1-minute data acquisition starts after
+  that point.
 - `symbol + timestamp` is the stable identity for a bar.
 - Timestamps are timezone-aware and phase 1 uses KST market bars.
 - Schema and inserts must be repeatable against a disposable local DB.
@@ -42,8 +53,14 @@ the PRD/test spec before implementation depends on them.
 - Keep strategy logic pure enough to run without a DB.
 - Keep data access behind loader/fetch functions so later real historical data
   can use the same schema.
-- Run one symbol per phase-1 backtest invocation; portfolio-level multi-symbol
-  accounting is deliberately deferred until the single-symbol contract is stable.
+- Phase 1 is complete only after the backtest supports multi-symbol execution.
+  Initial multi-symbol accounting may keep one independent strategy/position
+  state per symbol and aggregate the report deterministically.
+- Rationale for adding multi-symbol support to phase 1: the user clarified on
+  2026-05-09 that first-phase backtesting should naturally finish at
+  multi-symbol coverage. A single-symbol-only backtest is useful as an
+  intermediate scaffold, but it is not sufficient as the phase-1 destination for
+  an automated trading system.
 - Keep a friction layer in the backtest engine through fee/slippage settings.
 - Produce deterministic reports with `trade_count`, `gross_pnl`, `net_pnl`,
   `max_drawdown`, `start_equity`, and `end_equity`.

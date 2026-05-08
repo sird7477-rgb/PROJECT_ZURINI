@@ -7,7 +7,7 @@ import pytest
 from zurini.backtest.engine import BacktestConfig, run_backtest
 from zurini.data.dummy import money
 from zurini.data.dummy import generate_dummy_bars
-from zurini.market import Bar
+from zurini.market import Bar, SignalIntent
 from zurini.strategies.baseline import RiskState
 
 
@@ -87,8 +87,60 @@ def test_missing_blacklist_heartbeat_blocks_entries_conservatively():
     assert report.trade_count == 0
 
 
-def test_phase_one_backtest_rejects_multi_symbol_runs():
+def test_phase_one_backtest_supports_multi_symbol_runs():
+    second_symbol = generate_dummy_bars(symbol="ZRN002", trading_day="2026-01-06")
+    bars = generate_dummy_bars(symbol="ZRN001") + second_symbol
+
+    report, trades = run_backtest(bars)
+
+    assert report.trade_count == 2
+    assert {trade.symbol for trade in trades} == {"ZRN001", "ZRN002"}
+    assert [trade.entry_time for trade in trades] == sorted(trade.entry_time for trade in trades)
+    assert report.start_equity == Decimal("10000000")
+    assert report.end_equity == report.start_equity + report.net_pnl
+
+
+def test_multi_symbol_run_uses_strategy_factory_per_symbol():
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    bars = generate_dummy_bars(symbol="ZRN001")[:3] + generate_dummy_bars(symbol="ZRN002")[:3]
+
+    report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(fee_rate=Decimal("0"), slippage_rate=Decimal("0")),
+    )
+
+    assert report.trade_count == 2
+    assert {trade.symbol for trade in trades} == {"ZRN001", "ZRN002"}
+
+
+def test_multi_symbol_non_divisible_equity_allocation_is_deterministic():
+    bars = (
+        generate_dummy_bars(symbol="ZRN001")
+        + generate_dummy_bars(symbol="ZRN002")
+        + generate_dummy_bars(symbol="ZRN003")
+    )
+
+    report_a, trades_a = run_backtest(bars, config=BacktestConfig(start_equity=Decimal("10000.01")))
+    report_b, trades_b = run_backtest(bars, config=BacktestConfig(start_equity=Decimal("10000.01")))
+
+    assert report_a == report_b
+    assert trades_a == trades_b
+    assert report_a.start_equity == Decimal("10000.01")
+    assert report_a.end_equity == report_a.start_equity + report_a.net_pnl
+
+
+def test_multi_symbol_run_rejects_shared_strategy_instance():
     bars = generate_dummy_bars(symbol="ZRN001") + generate_dummy_bars(symbol="ZRN002")
 
-    with pytest.raises(ValueError, match="one symbol"):
-        run_backtest(bars)
+    with pytest.raises(ValueError, match="strategy_factory"):
+        run_backtest(bars, strategy=object())
