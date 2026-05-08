@@ -1,52 +1,84 @@
 # Project ZURINI Agent Instructions
 
-This repository is the planning and automation baseline for PROJECT_ZURINI, a
-Korean-market automated trading system design. The current repository state is
-documentation-first: it contains strategy, architecture, flow, and sequence
-documents under `(old)/`, plus Codex/OMX automation scripts.
+PROJECT_ZURINI is a development repository for rebuilding an automated trading
+system from the strategy stage.
 
-There is no executable trading engine in this baseline yet.
+The `(old)/` directory is preserved as past-history reference material only. Do
+not treat those files as the current specification, and do not rewrite or delete
+them unless the user explicitly asks for archival cleanup.
 
-## Project Scope
+There is no executable trading engine in the repository yet.
+
+## Current Phase
+
+Phase 1 ends at a reproducible local backtest.
+
+Target:
+
+- Python-based automated-trading system foundation
+- local personal PC execution
+- Docker Compose Postgres as the phase-1 database
+- standard 1-minute-bar DB schema and data contract
+- deterministic dummy 1-minute-bar data
+- schema/data validator
+- at least one simple strategy that can run through the backtest framework
+- minimal reproducible backtest report
+
+Phase 1 is not trying to prove that a strategy is profitable. It is building the
+framework that lets future strategies be tested repeatedly and safely.
+
+## Scope Rules
 
 Allowed without a new plan:
 
-- documentation cleanup that preserves the trading rules and diagrams
-- workflow clarification
+- phase-1 documentation under `docs/`
+- Python project scaffolding for data contracts, dummy data, validation, and
+  backtesting
+- Docker Compose Postgres setup for local development and tests
+- pytest tests for schema validation, deterministic fixtures, and backtest smoke
+  behavior
 - verification script improvements
 - narrow automation reliability fixes
-- repository hygiene for git, review, and CI-style checks
 
 Not allowed without an explicit new plan:
 
 - live trading code that can place real orders
-- broker API credential handling
-- authentication, authorization, or security-sensitive changes
-- data model, migration, or destructive storage changes
-- new dependencies or external services
-- large architecture rewrites
-- changes that weaken risk controls, kill switches, or verification language
+- broker API integration
+- API keys, account numbers, credentials, or secret handling
+- paper trading that connects to an external broker
+- production server deployment or cloud infrastructure
+- strategy-parameter hardcoding as a final trading recommendation
+- destructive storage changes outside disposable local test databases
+- new dependencies unrelated to phase-1 backtest infrastructure
 
-## Domain Rules
+## Phase-1 Quality Bar
 
-- Treat `(old)/` as the current source material until a replacement docs layout is
-  approved.
-- Preserve Korean strategy details, thresholds, and risk controls unless the user
-  explicitly asks to revise them.
-- Keep live-order behavior out of scope until sandbox, backtest, and paper-trade
-  verification are defined.
-- Prefer small, reviewable diffs. Do not summarize away detailed trading rules.
+Be strict about framework quality:
+
+- reproducible commands
+- deterministic dummy data generation
+- explicit 1-minute-bar schema contract
+- DB constraints that protect data shape
+- validator failures for invalid data
+- tests that explain what broke
+- no real broker calls, real orders, or secrets
+
+Be flexible about strategy details:
+
+- universe filters
+- entry/exit thresholds
+- stop/take-profit numbers
+- fee and slippage assumptions
+- detailed report metrics
+- table/module names when a clearer design emerges
 
 ## Required References
 
-- `(old)/# [자동매매 전략 기획서].md`
-- `(old)/# [자동매매 전략 기획서_고도화].md`
-- `(old)/# [자동매매 플로우 차트].md`
-- `(old)/[자동매매_시퀀스_다이어그램].md`
-- `(old)/[자동매매_통합_아키텍처_설계서].md`
 - `docs/WORKFLOW.md`
+- `docs/phase-1-development.md`
 - `scripts/verify.sh`
 - `scripts/review-gate.sh`
+- `(old)/` for historical reference only
 
 ## Verification Rule
 
