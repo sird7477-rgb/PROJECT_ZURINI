@@ -24,7 +24,8 @@
 
 1. 요청 범위를 phase-1 목표 안에서 고정한다.
 2. 변경 전 `AGENTS.md`, 이 문서, `docs/phase-1-development.md`,
-   `scripts/verify.sh`를 확인한다.
+   `docs/phase-1-prd.md`, `docs/phase-1-test-spec.md`, `scripts/verify.sh`를
+   확인한다.
 3. `(old)/`는 참고용으로만 읽고 현재 명세로 승격하지 않는다.
 4. 작은 diff로 수정한다.
 5. 완료 전 diff를 확인한다.

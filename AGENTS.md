@@ -76,6 +76,8 @@ Be flexible about strategy details:
 
 - `docs/WORKFLOW.md`
 - `docs/phase-1-development.md`
+- `docs/phase-1-prd.md`
+- `docs/phase-1-test-spec.md`
 - `scripts/verify.sh`
 - `scripts/review-gate.sh`
 - `(old)/` for historical reference only
