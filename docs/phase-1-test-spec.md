@@ -38,6 +38,27 @@ Required now and throughout phase 1:
 - `docs/phase-1-development.md` exists.
 - `docs/phase-1-prd.md` exists.
 - `docs/phase-1-test-spec.md` exists.
+- docs state that phase-1 trading conditions, sequence, risk controls, and
+  architecture start from `(old)/`.
+- docs state that `(old)/` is a starting baseline, not an absolute constraint.
+
+### 2a. Old-Document Baseline Checks
+
+Required now and throughout phase 1:
+
+- archived strategy plan exists.
+- archived final/high-level strategy plan exists.
+- archived flow chart exists.
+- archived sequence diagram exists.
+- archived integrated architecture document exists.
+- verification anchors cover representative old-document concepts:
+  - trading strategy
+  - global beta throttling
+  - IOC emergency exit
+  - async blacklist sequence
+  - Universal Quant Core
+- direction changes from old-document assumptions must be documented in current
+  docs before implementation depends on them.
 
 ### 3. Postgres Availability
 

@@ -10,6 +10,16 @@ into Postgres, validate the data contract, run at least one simple strategy, and
 produce a minimal backtest report. It does not need to prove strategy
 profitability.
 
+Trading conditions, system sequence, risk-control rules, and architecture
+starting points must be derived from the archived `(old)/` documents. The old
+files remain unmodified source history; active requirements should be extracted
+into new docs or implementation artifacts.
+
+The old-document baseline is a starting point, not an absolute constraint.
+Direction changes are allowed when implementation evidence, schema constraints,
+tests, or user decisions justify them. Such changes must be documented before
+the code path depends on them.
+
 ## Users
 
 - Project owner running development on a personal local PC.
@@ -44,6 +54,26 @@ Postgres.
 The repository must contain a Python application/test layout that can be run from
 the repo root. Exact module names may change if the implementation remains clear
 and `./scripts/verify.sh` is kept current.
+
+### 1a. Old-Document Baseline Extraction
+
+Before implementing trading logic, extract phase-1-relevant rules from `(old)/`
+into current docs or code comments/tests.
+
+Required source themes:
+
+- trading entry/exit conditions
+- market regime or beta throttling behavior
+- risk controls and kill switches
+- sequence flow for startup, data checks, and backtest execution
+- architecture concepts such as data interface, strategy engine, and friction
+  layer
+
+If old documents conflict, prefer the more conservative rule for phase 1 and
+record the decision in `docs/`. Conservative means lower exposure, tighter risk
+limits, or skipping the trade entirely when the rule is unclear. If a later
+implementation or test result shows a better direction, update the active docs
+and tests instead of silently diverging.
 
 ### 2. Postgres Schema
 
@@ -166,6 +196,8 @@ Phase 1 is complete when:
 - validator positive and negative cases are tested.
 - dummy data insertion into Postgres is tested.
 - at least one backtest smoke test runs and produces the minimum report fields.
+- phase-1 trading/risk/sequence assumptions trace back to `(old)/` or document a
+  deliberate conservative interpretation.
 - safety guardrails reject live-trading/API/secret scope creep.
 
 ## Deferred Decisions

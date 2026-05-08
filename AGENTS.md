@@ -3,9 +3,18 @@
 PROJECT_ZURINI is a development repository for rebuilding an automated trading
 system from the strategy stage.
 
-The `(old)/` directory is preserved as past-history reference material only. Do
-not treat those files as the current specification, and do not rewrite or delete
-them unless the user explicitly asks for archival cleanup.
+The `(old)/` directory is preserved as past-history reference material. Do not
+rewrite or delete those files unless the user explicitly asks for archival
+cleanup.
+
+For phase-1 development, use `(old)/` as the starting baseline for trading
+conditions, strategy rules, risk controls, system sequence, and architecture
+decisions. Extract current implementation requirements from those files into
+new docs or code instead of editing the archived originals directly.
+
+This baseline is not absolute. During phase-1 work, direction may change when
+tests, schema design, implementation constraints, or user decisions show a
+better path. Record the reason in `docs/` before changing direction.
 
 There is no executable trading engine in the repository yet.
 
@@ -23,6 +32,7 @@ Target:
 - schema/data validator
 - at least one simple strategy that can run through the backtest framework
 - minimal reproducible backtest report
+- initial trading conditions, sequence, and risk rules derived from `(old)/`
 
 Phase 1 is not trying to prove that a strategy is profitable. It is building the
 framework that lets future strategies be tested repeatedly and safely.
@@ -72,6 +82,13 @@ Be flexible about strategy details:
 - detailed report metrics
 - table/module names when a clearer design emerges
 
+When strategy details are needed for the first implementation pass, start from
+the archived trading plans and diagrams in `(old)/`. If a detail is ambiguous or
+conflicting across old files, document the chosen interpretation in `docs/`
+before coding. If implementation evidence suggests a better direction, update
+the current docs and tests instead of treating the archived files as immutable
+requirements.
+
 ## Required References
 
 - `docs/WORKFLOW.md`
@@ -80,7 +97,8 @@ Be flexible about strategy details:
 - `docs/phase-1-test-spec.md`
 - `scripts/verify.sh`
 - `scripts/review-gate.sh`
-- `(old)/` for historical reference only
+- `(old)/` as the phase-1 starting baseline for trading conditions, sequence,
+  risk controls, and architecture
 
 ## Verification Rule
 
