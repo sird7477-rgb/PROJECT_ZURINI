@@ -2,6 +2,12 @@ import pytest
 
 from zurini.data import db
 from zurini.data.dummy import generate_dummy_bars
+from zurini.data.large_dummy import (
+    generate_symbol_metadata,
+    get_large_dummy_profile,
+    iter_large_dummy_index_bars,
+    iter_large_dummy_market_bars,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -43,7 +49,7 @@ def test_schema_rejects_duplicate_symbol_timestamp():
 
 
 def test_phase_two_staging_tables_exist_for_indices_and_symbol_metadata():
-    db.reset_market_bars()
+    db.reset_rehearsal_tables()
 
     with db._connect() as conn:
         index_count = conn.execute("SELECT count(*) FROM index_bars").fetchone()[0]
@@ -51,3 +57,29 @@ def test_phase_two_staging_tables_exist_for_indices_and_symbol_metadata():
 
     assert index_count == 0
     assert metadata_count == 0
+
+
+def test_synthetic_rehearsal_loads_market_index_and_metadata_tables():
+    profile = get_large_dummy_profile("smoke")
+    market_bars = list(iter_large_dummy_market_bars(profile))
+    index_bars = list(iter_large_dummy_index_bars(profile))
+    metadata = generate_symbol_metadata(profile)
+    db.reset_rehearsal_tables()
+
+    assert db.insert_symbol_metadata(metadata) == profile.symbol_count
+    assert db.insert_bars(market_bars) == profile.market_bar_count
+    assert db.insert_index_bars(index_bars) == profile.index_bar_count
+
+    with db._connect() as conn:
+        market_count = conn.execute("SELECT count(*) FROM market_bars").fetchone()[0]
+        index_count = conn.execute("SELECT count(*) FROM index_bars").fetchone()[0]
+        metadata_count = conn.execute("SELECT count(*) FROM symbol_metadata").fetchone()[0]
+        index_codes = {
+            row[0]
+            for row in conn.execute("SELECT DISTINCT index_code FROM index_bars ORDER BY index_code").fetchall()
+        }
+
+    assert market_count == profile.market_bar_count
+    assert index_count == profile.index_bar_count
+    assert metadata_count == profile.symbol_count
+    assert index_codes == set(profile.index_codes)

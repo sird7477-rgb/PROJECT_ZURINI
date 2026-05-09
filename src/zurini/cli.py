@@ -13,6 +13,14 @@ from zurini.data import db
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
 from zurini.data.csv_quality import discover_daishin_csv_paths, scan_daishin_csv_tree
 from zurini.data.dummy import generate_dummy_bars
+from zurini.data.large_dummy import (
+    PROFILES,
+    generate_symbol_metadata,
+    get_large_dummy_profile,
+    iter_large_dummy_index_bars,
+    iter_large_dummy_market_bars,
+    summarize_large_dummy_profile,
+)
 from zurini.market import Bar
 from zurini.reports.files import write_backtest_outputs
 
@@ -45,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_backtest_csv_command(args)
     if args.command == "scan-csv":
         return run_scan_csv_command(args)
+    if args.command == "rehearse-large-dummy":
+        return run_rehearse_large_dummy_command(args)
     parser.print_help()
     return 2
 
@@ -79,6 +89,31 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_csv.add_argument("--root", type=Path, required=True, help="CSV file or directory tree")
     scan_csv.add_argument("--source", default="sample")
     scan_csv.add_argument("--output", type=Path, default=Path("reports/csv-scan.json"))
+
+    rehearse = subparsers.add_parser(
+        "rehearse-large-dummy",
+        help="run a bounded phase-1.5 synthetic large-data rehearsal",
+    )
+    rehearse.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    rehearse.add_argument("--profile", choices=sorted(PROFILES), default="smoke")
+    rehearse.add_argument("--output-dir", type=Path, default=Path("reports/phase15-large-dummy"))
+    rehearse.add_argument(
+        "--include-quality-anomalies",
+        action="store_true",
+        help="include optional gap/zero-volume quality fixtures and report duplicate/invalid fixtures",
+    )
+    rehearse.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="write only the profile/count/anomaly report without loading Postgres or running a backtest",
+    )
+    rehearse.add_argument(
+        "--max-materialized-market-rows",
+        type=int,
+        default=200_000,
+        help="guardrail that prevents accidental full local materialization on 16 GB PCs",
+    )
+    rehearse.add_argument("--keep-db", action="store_true", help="do not reset rehearsal tables before loading")
     return parser
 
 
@@ -203,6 +238,79 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
     print(f"gap_count={summary.gap_count}")
     print(f"report={args.output}")
     return 1 if summary.error_count else 0
+
+
+def run_rehearse_large_dummy_command(args: argparse.Namespace) -> int:
+    profile = get_large_dummy_profile(args.profile)
+    if not args.dry_run and profile.market_bar_count > args.max_materialized_market_rows:
+        raise ValueError(
+            f"profile {profile.name!r} would materialize {profile.market_bar_count} market rows; "
+            "use --dry-run for sizing evidence or raise --max-materialized-market-rows explicitly"
+        )
+
+    config = load_config(args.config)
+    metadata = generate_symbol_metadata(profile)
+    backtest_payload: dict[str, object] = {}
+    inserted_market_rows = 0
+    inserted_index_rows = 0
+    inserted_metadata_rows = 0
+
+    if not args.dry_run:
+        if args.keep_db:
+            db.apply_schema()
+        else:
+            db.reset_rehearsal_tables()
+        inserted_metadata_rows = db.insert_symbol_metadata(metadata)
+        inserted_market_rows = db.insert_bars(
+            iter_large_dummy_market_bars(
+                profile,
+                include_quality_anomalies=args.include_quality_anomalies,
+            )
+        )
+        inserted_index_rows = db.insert_index_bars(iter_large_dummy_index_bars(profile))
+        backtest_bars: list[Bar] = []
+        for item in metadata:
+            backtest_bars.extend(db.fetch_bars(item.symbol))
+        report, trades = run_backtest(backtest_bars, config=config.backtest)
+        outputs = write_backtest_outputs(
+            report=report,
+            trades=trades,
+            output_dir=args.output_dir / "backtest",
+            symbols=[item.symbol for item in metadata],
+            inserted_rows=inserted_market_rows,
+            title="PROJECT_ZURINI phase-1.5 synthetic large-dummy rehearsal backtest",
+        )
+        backtest_payload = {
+            "trade_count": report.trade_count,
+            "gross_pnl": str(report.gross_pnl),
+            "net_pnl": str(report.net_pnl),
+            "max_drawdown": str(report.max_drawdown),
+            "start_equity": str(report.start_equity),
+            "end_equity": str(report.end_equity),
+            "report": str(outputs["json"]),
+        }
+
+    summary = summarize_large_dummy_profile(
+        profile,
+        include_quality_anomalies=args.include_quality_anomalies,
+        inserted_market_rows=inserted_market_rows,
+        inserted_index_rows=inserted_index_rows,
+        inserted_metadata_rows=inserted_metadata_rows,
+        backtest=backtest_payload,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = args.output_dir / "rehearsal-summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    print(f"profile={profile.name}")
+    print(f"logical_months={profile.logical_months}")
+    print(f"estimated_market_rows={profile.market_bar_count}")
+    print(f"estimated_index_rows={profile.index_bar_count}")
+    print(f"metadata_rows={len(metadata)}")
+    print(f"inserted_market_rows={inserted_market_rows}")
+    print(f"inserted_index_rows={inserted_index_rows}")
+    print(f"report={summary_path}")
+    return 0
 
 
 def load_config(path: Path, *, output_dir: Path | None = None) -> Phase1Config:

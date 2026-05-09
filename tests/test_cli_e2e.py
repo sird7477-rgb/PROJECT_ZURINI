@@ -31,3 +31,74 @@ def test_phase1_cli_loads_db_runs_backtest_and_writes_reports(tmp_path):
     assert "PROJECT_ZURINI phase-1 dummy multi-symbol backtest" in summary_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_phase15_large_dummy_rehearsal_cli_writes_profile_report(tmp_path):
+    output_dir = tmp_path / "phase15-report"
+
+    exit_code = main(
+        [
+            "rehearse-large-dummy",
+            "--profile",
+            "smoke",
+            "--include-quality-anomalies",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    summary_path = output_dir / "rehearsal-summary.json"
+    backtest_path = output_dir / "backtest" / "report.json"
+    assert summary_path.exists()
+    assert backtest_path.exists()
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert payload["purpose"] == "phase-1.5 synthetic system rehearsal; not strategy profitability evidence"
+    assert payload["real_data_source_boundary"] == "future real data source is Korea Investment Securities only"
+    assert payload["profile"]["name"] == "smoke"
+    assert payload["profile"]["logical_months"] == 24
+    assert payload["profile"]["market_bar_count"] == 2304
+    assert payload["profile"]["index_bar_count"] == 1152
+    assert payload["inserted_rows"]["market_bars"] == 2303
+    assert payload["inserted_rows"]["index_bars"] == 1152
+    assert payload["inserted_rows"]["symbol_metadata"] == 8
+    assert "duplicate" in payload["quality_anomalies"]["duplicate_timestamp_error"]
+    assert {"trade_count", "gross_pnl", "net_pnl", "max_drawdown", "start_equity", "end_equity"} <= set(
+        payload["backtest"]
+    )
+
+
+def test_phase15_large_dummy_scale_profile_can_dry_run_without_db(tmp_path):
+    output_dir = tmp_path / "phase15-scale"
+
+    exit_code = main(
+        [
+            "rehearse-large-dummy",
+            "--profile",
+            "scale",
+            "--dry-run",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "rehearsal-summary.json").read_text(encoding="utf-8"))
+    assert payload["profile"]["name"] == "scale"
+    assert payload["profile"]["logical_months"] == 24
+    assert payload["inserted_rows"]["market_bars"] == 0
+    assert payload["backtest"] == {}
+
+
+def test_phase15_large_dummy_scale_profile_requires_explicit_materialization_limit(tmp_path):
+    with pytest.raises(ValueError, match="would materialize"):
+        main(
+            [
+                "rehearse-large-dummy",
+                "--profile",
+                "scale",
+                "--output-dir",
+                str(tmp_path / "phase15-scale"),
+            ]
+        )
