@@ -132,3 +132,46 @@ def test_trade_continuity_trade_summary_splits_valid_and_invalid_trades():
     assert summary.valid_net_pnl == Decimal("1")
     assert summary.invalid_net_pnl == Decimal("1")
     assert summary.invalid_reasons == {"test": 1}
+
+
+def test_exact_bar_trade_continuity_passes_sparse_observed_entry_and_exit():
+    entry = datetime(2026, 5, 4, 9, 10, tzinfo=KST)
+    exit_ = datetime(2026, 5, 4, 9, 20, tzinfo=KST)
+    bars = [_bar("A000001", entry), _bar("A000001", exit_)]
+
+    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], audit_mode="exact-bar")
+
+    assert result.status == "passed"
+    assert result.failed_points == 0
+    assert all(check.audit_mode == "exact-bar" for check in result.checks)
+    assert all(check.exact_bar_present is True for check in result.checks)
+
+
+def test_exact_bar_trade_continuity_fails_when_exact_entry_is_missing_even_with_neighbors():
+    entry = datetime(2026, 5, 4, 9, 10, tzinfo=KST)
+    exit_ = datetime(2026, 5, 4, 9, 20, tzinfo=KST)
+    bars = [
+        _bar("A000001", entry - timedelta(minutes=1)),
+        _bar("A000001", entry + timedelta(minutes=1)),
+        _bar("A000001", exit_),
+    ]
+
+    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], audit_mode="exact-bar")
+
+    assert result.status == "failed"
+    assert result.failed_points == 1
+    assert result.checks[0].status == "missing_exact_bar"
+    assert result.checks[0].exact_bar_present is False
+    assert result.checks[0].previous_observed_distance_minutes == 1
+    assert result.checks[0].next_observed_distance_minutes == 1
+
+
+def test_trade_continuity_rejects_unknown_audit_mode():
+    entry = datetime(2026, 5, 4, 9, 10, tzinfo=KST)
+
+    try:
+        assess_trade_continuity([], [_trade("A000001", entry, entry)], audit_mode="unknown")
+    except ValueError as exc:
+        assert "audit_mode" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

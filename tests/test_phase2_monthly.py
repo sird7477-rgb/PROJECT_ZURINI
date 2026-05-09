@@ -40,6 +40,8 @@ def test_monthly_plan_selects_completed_months_and_common_symbols(tmp_path):
         str(root / "202602" / "A111111.csv"),
     ]
     assert "--path-list" in plan.recommended_command
+    assert "--trade-continuity-mode" in plan.recommended_command
+    assert "exact-bar" in plan.recommended_command
 
 
 def test_monthly_plan_can_restrict_requested_months(tmp_path):

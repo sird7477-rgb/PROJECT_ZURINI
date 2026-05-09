@@ -74,6 +74,9 @@ class Phase2BatchSummary:
     total_valid_net_pnl: str
     total_invalid_net_pnl: str
     continuity_status: str
+    invalid_trade_ratio: str
+    invalid_net_pnl_ratio: str
+    optimization_gate_status: str
     exit_reasons: dict[str, int]
     reports: list[BacktestRunSummary]
 
@@ -134,6 +137,8 @@ def build_monthly_rehearsal_plan(
         "daishin-historical",
         "--path-list",
         str(path_list_file),
+        "--trade-continuity-mode",
+        "exact-bar",
         "--output-dir",
         str(output_dir / "backtest"),
     ]
@@ -195,8 +200,19 @@ def build_phase2_batch_summary(report_paths: list[Path]) -> Phase2BatchSummary:
         for reason, count in report.exit_reasons.items():
             exit_reasons[reason] = exit_reasons.get(reason, 0) + count
     total_invalid_trades = sum(report.invalid_trades for report in reports)
+    total_trade_count = sum(report.trade_count for report in reports)
+    total_net_pnl = sum((_decimal(report.net_pnl) for report in reports), Decimal("0"))
+    total_invalid_net_pnl = sum((_decimal(report.invalid_net_pnl) for report in reports), Decimal("0"))
     all_reports_passed = all(report.continuity_status == "passed" for report in reports)
     continuity_status = "passed" if total_invalid_trades == 0 and all_reports_passed else "review-required"
+    invalid_trade_ratio = _ratio(total_invalid_trades, total_trade_count)
+    invalid_net_pnl_ratio = _net_pnl_ratio(total_invalid_net_pnl, total_net_pnl)
+    # Keep the gate defensive even if an upstream report mislabels continuity.
+    optimization_gate_status = (
+        "passed"
+        if continuity_status == "passed" and invalid_trade_ratio == Decimal("0") and invalid_net_pnl_ratio == Decimal("0")
+        else "blocked"
+    )
     return Phase2BatchSummary(
         purpose="phase-2 backtest batch operational summary",
         interpretation_boundary=(
@@ -204,13 +220,16 @@ def build_phase2_batch_summary(report_paths: list[Path]) -> Phase2BatchSummary:
         ),
         report_count=len(reports),
         total_inserted_rows=sum(report.inserted_rows for report in reports),
-        total_trade_count=sum(report.trade_count for report in reports),
-        total_net_pnl=str(sum((_decimal(report.net_pnl) for report in reports), Decimal("0"))),
+        total_trade_count=total_trade_count,
+        total_net_pnl=str(total_net_pnl),
         total_valid_trades=sum(report.valid_trades for report in reports),
         total_invalid_trades=total_invalid_trades,
         total_valid_net_pnl=str(sum((_decimal(report.valid_net_pnl) for report in reports), Decimal("0"))),
-        total_invalid_net_pnl=str(sum((_decimal(report.invalid_net_pnl) for report in reports), Decimal("0"))),
+        total_invalid_net_pnl=str(total_invalid_net_pnl),
         continuity_status=continuity_status,
+        invalid_trade_ratio=_format_decimal(invalid_trade_ratio),
+        invalid_net_pnl_ratio=_format_decimal(invalid_net_pnl_ratio),
+        optimization_gate_status=optimization_gate_status,
         exit_reasons=exit_reasons,
         reports=reports,
     )
@@ -286,6 +305,9 @@ def _batch_summary_markdown(summary: Phase2BatchSummary) -> str:
         f"- total_valid_net_pnl: {summary.total_valid_net_pnl}",
         f"- total_invalid_net_pnl: {summary.total_invalid_net_pnl}",
         f"- continuity_status: {summary.continuity_status}",
+        f"- invalid_trade_ratio: {summary.invalid_trade_ratio}",
+        f"- invalid_net_pnl_ratio: {summary.invalid_net_pnl_ratio}",
+        f"- optimization_gate_status: {summary.optimization_gate_status}",
         "",
         "## Exit Reasons",
         "",
@@ -315,6 +337,24 @@ def _batch_summary_markdown(summary: Phase2BatchSummary) -> str:
 
 def _decimal(value: str) -> Decimal:
     return Decimal(str(value))
+
+
+def _ratio(numerator: int, denominator: int) -> Decimal:
+    if denominator == 0:
+        return Decimal("0")
+    return Decimal(numerator) / Decimal(denominator)
+
+
+def _net_pnl_ratio(invalid_net_pnl: Decimal, total_net_pnl: Decimal) -> Decimal:
+    denominator = abs(total_net_pnl) if total_net_pnl != 0 else Decimal("1")
+    return abs(invalid_net_pnl) / denominator
+
+
+def _format_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    formatted = format(value, "f")
+    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
 
 
 def _discover_months(root: Path, *, current_yyyymm: str) -> list[MonthlyDataset]:

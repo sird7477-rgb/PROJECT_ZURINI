@@ -21,6 +21,10 @@ class TradeContinuityCheck:
     window_minutes: int
     missing_minutes: int
     status: str
+    audit_mode: str = "dense-window"
+    exact_bar_present: bool | None = None
+    previous_observed_distance_minutes: int | None = None
+    next_observed_distance_minutes: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -61,10 +65,13 @@ def assess_trade_continuity(
     trades: list[Trade],
     *,
     window_minutes: int = 5,
+    audit_mode: str = "dense-window",
     session_start: time = DEFAULT_SESSION_START,
     session_end: time = DEFAULT_SESSION_END,
     session_timezone: ZoneInfo = DEFAULT_SESSION_TIMEZONE,
 ) -> TradeContinuitySummary:
+    if audit_mode not in {"dense-window", "exact-bar"}:
+        raise ValueError("audit_mode must be 'dense-window' or 'exact-bar'")
     timestamps_by_symbol = _timestamps_by_symbol(bars)
     checks: list[TradeContinuityCheck] = []
     for trade in trades:
@@ -75,6 +82,7 @@ def assess_trade_continuity(
                 kind="entry",
                 timestamps=timestamps_by_symbol.get(trade.symbol, set()),
                 window_minutes=window_minutes,
+                audit_mode=audit_mode,
                 session_start=session_start,
                 session_end=session_end,
                 session_timezone=session_timezone,
@@ -87,6 +95,7 @@ def assess_trade_continuity(
                 kind="exit",
                 timestamps=timestamps_by_symbol.get(trade.symbol, set()),
                 window_minutes=window_minutes,
+                audit_mode=audit_mode,
                 session_start=session_start,
                 session_end=session_end,
                 session_timezone=session_timezone,
@@ -158,10 +167,12 @@ def _check_trade_time(
     kind: str,
     timestamps: set[datetime],
     window_minutes: int,
+    audit_mode: str,
     session_start: time,
     session_end: time,
     session_timezone: ZoneInfo,
 ) -> TradeContinuityCheck:
+    previous_distance, next_distance = _nearest_observed_distances(trade_time, timestamps)
     if not _in_session(trade_time, session_start, session_end, session_timezone):
         return TradeContinuityCheck(
             symbol=symbol,
@@ -170,6 +181,24 @@ def _check_trade_time(
             window_minutes=window_minutes,
             missing_minutes=0,
             status="out_of_session",
+            audit_mode=audit_mode,
+            exact_bar_present=trade_time in timestamps,
+            previous_observed_distance_minutes=previous_distance,
+            next_observed_distance_minutes=next_distance,
+        )
+    exact_bar_present = trade_time in timestamps
+    if audit_mode == "exact-bar":
+        return TradeContinuityCheck(
+            symbol=symbol,
+            trade_time=trade_time.isoformat(),
+            kind=kind,
+            window_minutes=window_minutes,
+            missing_minutes=0 if exact_bar_present else 1,
+            status="passed" if exact_bar_present else "missing_exact_bar",
+            audit_mode=audit_mode,
+            exact_bar_present=exact_bar_present,
+            previous_observed_distance_minutes=previous_distance,
+            next_observed_distance_minutes=next_distance,
         )
     expected: list[datetime] = []
     for offset in range(-window_minutes, window_minutes + 1):
@@ -188,6 +217,10 @@ def _check_trade_time(
         window_minutes=window_minutes,
         missing_minutes=missing,
         status="passed" if missing == 0 else "failed",
+        audit_mode=audit_mode,
+        exact_bar_present=exact_bar_present,
+        previous_observed_distance_minutes=previous_distance,
+        next_observed_distance_minutes=next_distance,
     )
 
 
@@ -214,3 +247,17 @@ def _session_local_date(timestamp: datetime, session_timezone: ZoneInfo):
     if timestamp.tzinfo is None:
         return timestamp.date()
     return timestamp.astimezone(session_timezone).date()
+
+
+def _nearest_observed_distances(trade_time: datetime, timestamps: set[datetime]) -> tuple[int | None, int | None]:
+    previous = [
+        int((trade_time - timestamp).total_seconds() // 60)
+        for timestamp in timestamps
+        if timestamp < trade_time
+    ]
+    next_ = [
+        int((timestamp - trade_time).total_seconds() // 60)
+        for timestamp in timestamps
+        if timestamp > trade_time
+    ]
+    return (min(previous) if previous else None, min(next_) if next_ else None)

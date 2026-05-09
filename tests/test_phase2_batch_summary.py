@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ def _write_report(
     net_pnl: str,
     valid_trades: int | None = None,
     invalid_trades: int = 0,
+    invalid_net_pnl: str | None = None,
     reason: str = "profit-target",
     continuity_status: str | None = None,
 ) -> None:
@@ -57,7 +59,7 @@ def _write_report(
                     "valid_trades": valid,
                     "invalid_trades": invalid_trades,
                     "valid_net_pnl": "10.50",
-                    "invalid_net_pnl": "-3.25" if invalid_trades else "0",
+                    "invalid_net_pnl": invalid_net_pnl if invalid_net_pnl is not None else ("-3.25" if invalid_trades else "0"),
                 },
             },
             indent=2,
@@ -98,6 +100,9 @@ def test_phase2_summarize_runs_cli_writes_json_and_markdown(tmp_path):
     assert payload["total_trade_count"] == 3
     assert payload["total_net_pnl"] == "4.25"
     assert payload["continuity_status"] == "passed"
+    assert payload["invalid_trade_ratio"] == "0"
+    assert payload["invalid_net_pnl_ratio"] == "0"
+    assert payload["optimization_gate_status"] == "passed"
     assert "Phase 2 Batch Summary" in markdown
 
 
@@ -177,10 +182,49 @@ def test_phase2_summarize_runs_flags_continuity_failures(tmp_path):
     summary = build_phase2_batch_summary([report])
 
     assert summary.continuity_status == "review-required"
+    assert summary.optimization_gate_status == "blocked"
+    assert summary.invalid_trade_ratio == "0.5"
+    assert summary.invalid_net_pnl_ratio == str(Decimal("3.25") / Decimal("7.25"))
     assert summary.total_valid_trades == 1
     assert summary.total_invalid_trades == 1
     assert summary.total_invalid_net_pnl == "-3.25"
     assert summary.exit_reasons == {"day-end": 2}
+
+
+def test_phase2_summarize_runs_formats_small_invalid_net_pnl_ratio_without_scientific_notation(tmp_path):
+    report = tmp_path / "report.json"
+    _write_report(
+        report,
+        symbols=["A000020"],
+        inserted_rows=100,
+        trade_count=1,
+        net_pnl="1000000",
+        valid_trades=0,
+        invalid_trades=1,
+        invalid_net_pnl="-0.001",
+    )
+
+    summary = build_phase2_batch_summary([report])
+
+    assert summary.invalid_net_pnl_ratio == "0.000000001"
+
+
+def test_phase2_summarize_runs_uses_actual_small_total_net_pnl_as_ratio_denominator(tmp_path):
+    report = tmp_path / "report.json"
+    _write_report(
+        report,
+        symbols=["A000020"],
+        inserted_rows=100,
+        trade_count=1,
+        net_pnl="0.5",
+        valid_trades=0,
+        invalid_trades=1,
+        invalid_net_pnl="-0.25",
+    )
+
+    summary = build_phase2_batch_summary([report])
+
+    assert summary.invalid_net_pnl_ratio == "0.5"
 
 
 def test_phase2_summarize_runs_flags_failed_continuity_status_even_without_invalid_count(tmp_path):

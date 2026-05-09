@@ -53,6 +53,12 @@ Required before use:
 Stop condition: if index bars have gaps, do not run market-regime filters for
 that interval. A strategy run using a broken index interval is analysis-only.
 
+Calendar limitation: the current implementation uses `observed-session-v1`,
+which records only observed shifted sessions found in the current local data
+(`2025-11-13` and `2026-01-02`). Add any additional exchange holiday or
+shifted-session day to the calendar before accepting index coverage for that
+interval.
+
 ### Class B: Stock Trade-Event Bars
 
 Individual stock files may be sparse. Missing stock bars are not automatically a
@@ -161,6 +167,8 @@ fresh quote`, not confirmed zero-volume minutes.
    - signals use observed stock bars only
    - stock gaps are profiled by symbol and month, not used as automatic DB
      promotion failures
+   - stock coverage profiling is executed by completed month, not by scanning
+     the full raw tree as the primary workflow
 4. Trade continuity gate:
    - trade reports include `trade_continuity`
    - summaries split valid and invalid trades
@@ -193,3 +201,14 @@ fresh quote`, not confirmed zero-volume minutes.
   optimization gate while still writing operational artifacts.
 - Add a strategy-metric view that reports valid-only PnL, invalid-only PnL, and
   invalid-trade ratio separately.
+
+## Operational Rule
+
+Stock coverage scans must be bounded by period. Use `--period YYYYMM` for each
+completed month and reserve full-root stock scans only for occasional
+reconciliation after monthly artifacts already exist. Use `--limit-files` for
+smoke checks before full monthly profiling. Long monthly runs must use
+`--progress-every` so progress is visible in logs instead of silently waiting.
+Sparse stock backtests must pass `--trade-continuity-mode exact-bar`
+explicitly; the CLI default remains `dense-window` to preserve older grid-audit
+artifacts.

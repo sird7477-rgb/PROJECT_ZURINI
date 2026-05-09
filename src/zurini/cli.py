@@ -13,6 +13,7 @@ from zurini.api_smoke import build_api_smoke_plan, run_api_smoke_network
 from zurini.data import db
 from zurini.data.acceptance import CsvAcceptanceCriteria, assess_csv_scan
 from zurini.data.continuity import assess_trade_continuity, summarize_trades_by_continuity
+from zurini.data.coverage import profile_csv_coverage
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
 from zurini.data.csv_quality import CsvScanSummary, discover_daishin_csv_paths, scan_daishin_csv_tree
 from zurini.data.dummy import generate_dummy_bars
@@ -68,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_phase2_monthly_plan_command(args)
     if args.command == "phase2-summarize-runs":
         return run_phase2_summarize_runs_command(args)
+    if args.command == "phase2-coverage":
+        return run_phase2_coverage_command(args)
     if args.command == "api-smoke":
         return run_api_smoke_command(args)
     if args.command == "rehearse-large-dummy":
@@ -102,6 +105,12 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest_csv.add_argument("--limit-files", type=int, help="limit discovered CSV files for smoke runs")
     backtest_csv.add_argument("--output-dir", type=Path, default=Path("reports/sample-backtest"))
     backtest_csv.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
+    backtest_csv.add_argument(
+        "--trade-continuity-mode",
+        choices=["exact-bar", "dense-window"],
+        default="dense-window",
+        help="dense-window preserves legacy grid audits; pass exact-bar for sparse phase-2 stock trade-event data",
+    )
 
     scan_csv = subparsers.add_parser("scan-csv", help="scan Daishin/CYBOS CSV files without loading Postgres")
     scan_csv.add_argument("--root", type=Path, required=True, help="CSV file or directory tree")
@@ -137,6 +146,18 @@ def _build_parser() -> argparse.ArgumentParser:
     phase2_summary.add_argument("--root", type=Path, action="append", default=[], help="report.json file or directory tree")
     phase2_summary.add_argument("--output-json", type=Path, default=Path("reports/phase2/batch-summary.json"))
     phase2_summary.add_argument("--output-md", type=Path, default=Path("reports/phase2/batch-summary.md"))
+
+    phase2_coverage = subparsers.add_parser(
+        "phase2-coverage",
+        help="profile phase-2 CSV coverage for strict index grids or sparse stock bars",
+    )
+    phase2_coverage.add_argument("--root", type=Path, required=True)
+    phase2_coverage.add_argument("--class-mode", choices=["index-grid", "stock-sparse"], required=True)
+    phase2_coverage.add_argument("--source", default="daishin-historical")
+    phase2_coverage.add_argument("--period", action="append", default=[], help="restrict to YYYYMM period directories")
+    phase2_coverage.add_argument("--limit-files", type=int, help="limit files for bounded smoke profiling")
+    phase2_coverage.add_argument("--progress-every", type=int, default=0, help="write progress to stderr every N files")
+    phase2_coverage.add_argument("--output", type=Path, default=Path("reports/phase2/coverage.json"))
 
     api_smoke = subparsers.add_parser("api-smoke", help="write a read-only API smoke-test plan")
     api_smoke.add_argument("--output", type=Path, default=Path("reports/api-smoke-plan.json"))
@@ -264,7 +285,7 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
             loaded_from_db.extend(db.fetch_bars(symbol))
 
     report, trades = run_backtest(loaded_from_db, config=config.backtest)
-    continuity = assess_trade_continuity(loaded_from_db, trades)
+    continuity = assess_trade_continuity(loaded_from_db, trades, audit_mode=args.trade_continuity_mode)
     continuity_trades = summarize_trades_by_continuity(trades, continuity)
     outputs = write_backtest_outputs(
         report=report,
@@ -376,9 +397,42 @@ def run_phase2_summarize_runs_command(args: argparse.Namespace) -> int:
     print(f"total_valid_trades={summary.total_valid_trades}")
     print(f"total_invalid_trades={summary.total_invalid_trades}")
     print(f"continuity_status={summary.continuity_status}")
+    print(f"optimization_gate_status={summary.optimization_gate_status}")
     print(f"summary_json={args.output_json}")
     print(f"summary_md={args.output_md}")
     return 0
+
+
+def run_phase2_coverage_command(args: argparse.Namespace) -> int:
+    summary = profile_csv_coverage(
+        args.root,
+        class_mode=args.class_mode,
+        source=args.source,
+        periods=args.period,
+        limit_files=args.limit_files,
+        progress_every=args.progress_every,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(summary.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if summary.file_count == 0:
+        print("warning=no csv files matched the requested root/period filters", file=sys.stderr)
+    print(f"root={summary.root}")
+    print(f"class_mode={summary.class_mode}")
+    print(f"calendar_version={summary.calendar_version}")
+    print(f"file_count={summary.file_count}")
+    print(f"ok_count={summary.ok_count}")
+    print(f"error_count={summary.error_count}")
+    print(f"accepted_count={summary.accepted_count}")
+    print(f"acceptance_status={summary.acceptance_status}")
+    print(f"coverage_ratio={summary.coverage_ratio:.6f}")
+    print(f"missing_minutes_count={summary.missing_minutes_count}")
+    print(f"longest_missing_run={summary.longest_missing_run}")
+    print(f"missing_edge_minutes={summary.missing_edge_minutes}")
+    print(f"out_of_session_count={summary.out_of_session_count}")
+    print(f"zero_volume_count={summary.zero_volume_count}")
+    print(f"report={args.output}")
+    return 0 if summary.acceptance_status == "accepted" else 1
 
 
 def run_api_smoke_command(args: argparse.Namespace) -> int:

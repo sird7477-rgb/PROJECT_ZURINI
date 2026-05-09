@@ -112,6 +112,40 @@ for stock data. Use `--max-missing-minutes` and `--max-gap-minutes` only after
 deciding whether the target source represents every session minute or only
 trade-event bars.
 
+Use the phase-2 coverage profiler to apply the class-specific gate:
+
+```bash
+.venv/bin/python -m zurini.cli phase2-coverage \
+  --root data/raw/daishin/index-bars \
+  --class-mode index-grid \
+  --source daishin-historical \
+  --output reports/phase2/index-coverage.json
+```
+
+For sparse stock bars, the same command profiles coverage without failing only
+because gaps exist:
+
+```bash
+.venv/bin/python -m zurini.cli phase2-coverage \
+  --root data/raw/daishin/minute-bars \
+  --class-mode stock-sparse \
+  --period 202604 \
+  --source daishin-historical \
+  --progress-every 100 \
+  --output reports/phase2/stock-coverage-202604.json
+```
+
+Backtest trade continuity keeps the legacy `dense-window` default for old
+artifacts. For sparse Phase 2 stock trade-event data, pass
+`--trade-continuity-mode exact-bar` explicitly; use `dense-window` only for
+materialized grids or a strategy that explicitly requires every-minute stock
+state.
+
+Do not run stock coverage against the full raw tree as the primary workflow.
+Profile completed months separately with `--period YYYYMM`; use `--limit-files`
+for smoke checks before full monthly profiling, and use `--progress-every` for
+long-running monthly profiles so the log proves active progress.
+
 For large local datasets, prefer monthly scan jobs with durable logs instead of
 a full-root scan as the primary workflow. A full-root scan may be kept as a
 final reconciliation step, but progress tracking should be based on per-month
