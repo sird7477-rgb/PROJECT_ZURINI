@@ -103,6 +103,15 @@ requirements.
 ## Required References
 
 - `docs/WORKFLOW.md`
+- `docs/AUTOMATION_OPERATING_POLICY.md`
+- `docs/AI_MODEL_ROUTING.md`
+- `docs/SESSION_QUALITY_PLAN.md`
+- `docs/DATA_COMPLETION.md`
+- `docs/DEPLOYMENT_COMPLETION.md`
+- `docs/OBSERVABILITY_COMPLETION.md`
+- `docs/PERFORMANCE_COMPLETION.md`
+- `docs/SECURITY_COMPLETION.md`
+- `docs/UI_COMPLETION.md`
 - `docs/phase-1-development.md`
 - `docs/phase-1-prd.md`
 - `docs/phase-1-test-spec.md`
@@ -131,6 +140,31 @@ or `proceed_degraded`, do not present the change as ready to commit.
 
 `proceed_degraded` may continue only when the degraded trust level and missing
 reviewer state are reported clearly.
+
+## Automation Template Merge Policy
+
+This repository uses the AI_AUTO automation base as a source for reusable
+automation, not as an overwrite authority. Preserve PROJECT_ZURINI rules first.
+
+When refreshing automation:
+
+- inspect existing `AGENTS.md`, `docs/WORKFLOW.md`, and `scripts/verify.sh`
+  before changing anything
+- do not overwrite project-specific guidance, secret rules, data boundaries,
+  trading phase boundaries, or verification commands
+- add only missing reusable automation files, helper scripts, or policy
+  references that do not conflict with this project
+- keep Odoo, branch, or unrelated environment rules out of this repository
+  unless they are explicitly PROJECT_ZURINI rules
+- deployment, performance, and observability completion packs are in scope as
+  interview-backed preparation for field-test-to-live operation; keep them
+  subordinate to PROJECT_ZURINI trading, data, and secret boundaries
+- UI completion is in scope as an operator dashboard, but implementation must
+  start from an AI proposal and user confirmation. Keep live-order controls
+  locked unless the user explicitly approves enabling them.
+- resolve conflicts in favor of project-local instructions
+- run `./scripts/automation-doctor.sh`, `./scripts/verify.sh`, and when a commit
+  candidate is involved `./scripts/review-gate.sh`
 
 ## Completion Report Format
 

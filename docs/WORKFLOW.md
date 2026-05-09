@@ -205,3 +205,71 @@ Ralph 또는 자동 실행 루프가 1차 개발을 완료했다고 말하려면
 ```bash
 ./scripts/review-gate.sh
 ```
+
+## 자동화 기반 병합 정책
+
+기존 프로젝트 업데이트는 재설치가 아니라 비교 후 병합이다. 최신 AI_AUTO
+템플릿은 참고 원본으로만 사용하고, PROJECT_ZURINI의 `AGENTS.md`,
+`docs/WORKFLOW.md`, `scripts/verify.sh`는 프로젝트 지침을 우선한다.
+
+병합 순서:
+
+1. 현재 프로젝트 루트와 git 상태를 확인한다.
+2. 기존 `AGENTS.md`, `docs/WORKFLOW.md`, `scripts/verify.sh`,
+   `scripts/automation-doctor.sh`, `scripts/review-gate.sh`를 먼저 읽는다.
+3. `/root/workspace/ai-lab/templates/automation-base`의 최신 템플릿과 비교한다.
+4. 프로젝트 지침, 보안/secret 정책, 데이터 경계, 커밋/검증 규칙은 유지한다.
+5. 빠진 reusable 자동화 문서와 helper script만 추가한다.
+6. 충돌나는 규칙은 프로젝트 지침을 우선한다.
+7. `./scripts/automation-doctor.sh`, `./scripts/verify.sh`, 필요 시
+   `./scripts/review-gate.sh`로 검증한다.
+
+현재 유지하는 reusable 자동화 문서:
+
+- `docs/AUTOMATION_OPERATING_POLICY.md`
+- `docs/AI_MODEL_ROUTING.md`
+- `docs/SESSION_QUALITY_PLAN.md`
+- `docs/DATA_COMPLETION.md`
+- `docs/SECURITY_COMPLETION.md`
+- `docs/DEPLOYMENT_COMPLETION.md`
+- `docs/PERFORMANCE_COMPLETION.md`
+- `docs/OBSERVABILITY_COMPLETION.md`
+- `docs/UI_COMPLETION.md`
+
+완료팩 적용 판단:
+
+- 유지: `DATA_COMPLETION.md`
+  - 이유: 1분봉 DB 스키마, CSV intake, raw/stage 승격, 백테스트 데이터 검증이
+    프로젝트 핵심이다.
+- 유지: `SECURITY_COMPLETION.md`
+  - 이유: API 키, 계좌, 토큰, 인증서 등 secret 경계가 프로젝트 품질 기준에
+    직접 포함된다.
+- 유지/인터뷰 대상: `DEPLOYMENT_COMPLETION.md`
+  - 이유: 필드 테스트 성공 후 실전 전환 가능성이 있으므로, 실행 환경,
+    시작/중지/헬스체크, 롤백, secret 주입 방식은 초기에 기준을 잡는다.
+- 유지/인터뷰 대상: `PERFORMANCE_COMPLETION.md`
+  - 이유: 2년치 1분봉, 다종목 백테스트, 향후 실시간 처리 경로는 CPU/메모리,
+    처리시간, 회귀 기준을 요구한다. 단, 성능 튜닝은 정확성 검증 이후에 한다.
+- 유지/인터뷰 대상: `OBSERVABILITY_COMPLETION.md`
+  - 이유: 필드/실전 단계에서는 주문 판단 근거, 데이터 품질, 장애 원인,
+    secret 비노출 로그, 헬스체크 evidence가 필요하다.
+- 유지/제안 후 승인: `UI_COMPLETION.md`
+  - 이유: 운영자는 사용자가 직접이며, 직관적인 대시보드형 운영 콘솔이 필요하다.
+    AI가 1차 UI 제안을 작성하고 사용자가 컨펌한 뒤 구현한다.
+  - 1차 UI 예상 구성: 기본 조작 버튼, 로그창, 매매기록, 계좌현황(보유종목,
+    수량, 수익률 등).
+  - 1차 허용 버튼: 시작, 중지, 일시정지, 재개, 상태 새로고침, 로그 열기,
+    리포트 열기.
+  - 확인 필요 버튼: 모의매매 시작, 전략 파라미터 변경, 데이터 재검증 실행.
+  - 초기 금지/잠금 버튼: 실전매매 시작, 실전 주문 전송, 계좌/키 변경,
+    자동 청산. 실전 주문 관련 버튼은 표시하더라도 잠금 상태여야 하며, 사용자
+    명시 승인 전에는 활성화하지 않는다.
+- 도메인팩: Odoo 등 프로젝트 외 도메인팩은 `AGENTS.md`나 이 문서에 병합하지
+  않는다. 존재하더라도 `.omx/domain-packs/` 아래 ignored 참고자료로만 둔다.
+
+현재 유지하는 reusable helper script:
+
+- `scripts/archive-omx-artifacts.sh`
+- `scripts/record-feedback.sh`
+- `scripts/record-project-memory.sh`
+- `scripts/write-session-checkpoint.sh`

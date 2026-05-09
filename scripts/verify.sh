@@ -83,6 +83,39 @@ log "checking review summary fixture logic..."
 ./scripts/test-review-summary.sh
 
 echo
+log "checking project memory helper secret screening..."
+memory_test_file="$(mktemp)"
+rm -f "$memory_test_file"
+OMX_PROJECT_MEMORY_FILE="$memory_test_file" ./scripts/record-project-memory.sh \
+  --category workflow \
+  --content "safe automation merge memory" \
+  --source "verify-smoke" >/dev/null
+if OMX_PROJECT_MEMORY_FILE="$memory_test_file" ./scripts/record-project-memory.sh \
+  --category workflow \
+  --content "safe automation merge memory" \
+  --source "api_key: should-not-store" >/dev/null 2>&1; then
+  rm -f "$memory_test_file"
+  fail "record-project-memory accepted secret-like source text"
+fi
+rm -f "$memory_test_file"
+
+log "checking feedback helper secret screening..."
+feedback_test_file="$(mktemp)"
+rm -f "$feedback_test_file"
+OMX_FEEDBACK_QUEUE_FILE="$feedback_test_file" ./scripts/record-feedback.sh \
+  --repeat-key "verify:feedback-secret-screen" \
+  --summary "safe feedback smoke" \
+  --source "verify-smoke" >/dev/null
+if OMX_FEEDBACK_QUEUE_FILE="$feedback_test_file" ./scripts/record-feedback.sh \
+  --repeat-key "verify:feedback-secret-screen" \
+  --summary "safe feedback smoke" \
+  --source "token: should-not-store" >/dev/null 2>&1; then
+  rm -f "$feedback_test_file"
+  fail "record-feedback accepted secret-like source text"
+fi
+rm -f "$feedback_test_file"
+
+echo
 log "checking automation files..."
 DOCTOR_SKIP_DIRTY_CHECK=1 ./scripts/automation-doctor.sh
 
@@ -90,6 +123,15 @@ echo
 log "checking PROJECT_ZURINI onboarding baseline..."
 require_file "AGENTS.md"
 require_file "docs/WORKFLOW.md"
+require_file "docs/AI_MODEL_ROUTING.md"
+require_file "docs/AUTOMATION_OPERATING_POLICY.md"
+require_file "docs/SESSION_QUALITY_PLAN.md"
+require_file "docs/DATA_COMPLETION.md"
+require_file "docs/DEPLOYMENT_COMPLETION.md"
+require_file "docs/OBSERVABILITY_COMPLETION.md"
+require_file "docs/PERFORMANCE_COMPLETION.md"
+require_file "docs/SECURITY_COMPLETION.md"
+require_file "docs/UI_COMPLETION.md"
 require_file "docs/phase-1-development.md"
 require_file "docs/phase-1-prd.md"
 require_file "docs/phase-1-test-spec.md"
@@ -115,24 +157,41 @@ require_file "(old)/[자동매매_시퀀스_다이어그램].md"
 require_file "(old)/[자동매매_통합_아키텍처_설계서].md"
 
 require_executable_script "scripts/automation-doctor.sh"
+require_executable_script "scripts/archive-omx-artifacts.sh"
 require_executable_script "scripts/collect-review-context.sh"
 require_executable_script "scripts/discover-ai-models.sh"
 require_executable_script "scripts/make-review-prompts.sh"
+require_executable_script "scripts/record-feedback.sh"
+require_executable_script "scripts/record-project-memory.sh"
 require_executable_script "scripts/review-gate.sh"
 require_executable_script "scripts/run-ai-reviews.sh"
 require_executable_script "scripts/summarize-ai-reviews.sh"
 require_executable_script "scripts/test-review-summary.sh"
 require_executable_script "scripts/verify.sh"
+require_executable_script "scripts/write-session-checkpoint.sh"
 
 require_text "AGENTS.md" "phase-1 development"
 require_text "AGENTS.md" "starting baseline for trading"
 require_text "AGENTS.md" "not absolute"
 require_text "AGENTS.md" "Phase 1 ends at a reproducible local backtest"
 require_text "AGENTS.md" "Docker Compose Postgres"
+require_text "AGENTS.md" "Automation Template Merge Policy"
 require_text "docs/WORKFLOW.md" "재현 가능한 로컬 백테스트"
 require_text "docs/WORKFLOW.md" "출발 기준"
 require_text "docs/WORKFLOW.md" "절대 기준이 아니다"
 require_text "docs/WORKFLOW.md" "references/api/"
+require_text "docs/WORKFLOW.md" "자동화 기반 병합 정책"
+require_text "docs/AI_MODEL_ROUTING.md" "role-first"
+require_text "docs/AUTOMATION_OPERATING_POLICY.md" "Review Intensity"
+require_text "docs/SESSION_QUALITY_PLAN.md" "Model Routing Cache"
+require_text "docs/DATA_COMPLETION.md" "Data Completion"
+require_text "docs/DEPLOYMENT_COMPLETION.md" "Deployment Completion"
+require_text "docs/OBSERVABILITY_COMPLETION.md" "Observability Completion"
+require_text "docs/PERFORMANCE_COMPLETION.md" "Performance Completion"
+require_text "docs/SECURITY_COMPLETION.md" "Security Completion"
+require_text "docs/UI_COMPLETION.md" "UI Completion"
+require_text "docs/WORKFLOW.md" "유지/제안 후 승인"
+require_text "docs/WORKFLOW.md" "실전 주문 관련 버튼은 표시하더라도 잠금 상태"
 require_text "docs/phase-1-development.md" "1분봉 데이터 스키마와 계약"
 require_text "docs/phase-1-development.md" "deterministic dummy data"
 require_text "docs/phase-1-development.md" "과거 문서 사용 원칙"

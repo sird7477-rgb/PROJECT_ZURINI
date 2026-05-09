@@ -287,14 +287,27 @@ ensure_dir "scripts"
 
 REQUIRED_FILES=(
   "AGENTS.md"
+  "docs/AI_MODEL_ROUTING.md"
+  "docs/AUTOMATION_OPERATING_POLICY.md"
+  "docs/DATA_COMPLETION.md"
+  "docs/DEPLOYMENT_COMPLETION.md"
+  "docs/OBSERVABILITY_COMPLETION.md"
+  "docs/PERFORMANCE_COMPLETION.md"
+  "docs/SECURITY_COMPLETION.md"
+  "docs/SESSION_QUALITY_PLAN.md"
+  "docs/UI_COMPLETION.md"
   "docs/WORKFLOW.md"
+  "scripts/archive-omx-artifacts.sh"
   "scripts/review-gate.sh"
   "scripts/collect-review-context.sh"
   "scripts/discover-ai-models.sh"
   "scripts/make-review-prompts.sh"
+  "scripts/record-feedback.sh"
+  "scripts/record-project-memory.sh"
   "scripts/run-ai-reviews.sh"
   "scripts/summarize-ai-reviews.sh"
   "scripts/test-review-summary.sh"
+  "scripts/write-session-checkpoint.sh"
 )
 
 for path in "${REQUIRED_FILES[@]}"; do
