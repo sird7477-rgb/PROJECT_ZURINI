@@ -39,11 +39,17 @@ Current CSV commands accept the established minute-bar column contract:
 date,time,open,high,low,close,volume
 ```
 
-All timestamps are interpreted as Asia/Seoul 1-minute bars. Missing minutes,
-duplicate `symbol + timestamp`, invalid OHLC, negative volume/value, and parse
-errors must be fixed before DB promotion.
+All timestamps are interpreted as Asia/Seoul 1-minute bars. Duplicate
+`symbol + timestamp`, invalid OHLC, negative volume/value, and parse errors must
+be fixed before DB promotion. Missing minutes are class-specific: index/regime
+bars must satisfy a strict session grid, while stock bars are treated as sparse
+trade-event evidence unless the source is proven to emit a fully materialized
+every-minute grid.
 
 ## Bar Continuity Policy
+
+Detailed promotion rules live in
+[`phase-2-data-continuity-criteria.md`](phase-2-data-continuity-criteria.md).
 
 Do not reject raw Daishin files only because `gap_count` is high. The collector
 may receive trade-event bars rather than a fully materialized every-minute grid,
@@ -72,9 +78,16 @@ continuity-valid trades from continuity-invalid trades. Strategy conclusions
 must be based on the continuity-valid segment, not on aggregate PnL inflated by
 trades whose entry/exit windows failed the continuity audit.
 
-Index/regime data should be stricter than stock data. Once the Korean exchange
-calendar and session grid are encoded, index bars should use a high session
-coverage threshold before they are allowed to drive market-wide filters.
+Index/regime data is stricter than stock data. It drives market-wide filters, so
+it must pass a session-grid gate before use. Current collected index files show
+`gap_count=0` and `missing_minutes_count=0` across the scanned 15-month set,
+while stock files show large gaps and no explicit zero-volume bars. Treat stock
+gaps as sparse trade-event evidence until the source contract proves a fully
+materialized stock grid.
+
+Until the index acceptance command exists, regime-filtered backtests are
+analysis-only. Baseline backtests may continue only with regime filters disabled
+or with a report that explicitly marks the missing index gate.
 
 ## Gate Command
 
