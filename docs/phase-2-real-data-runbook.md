@@ -43,6 +43,39 @@ All timestamps are interpreted as Asia/Seoul 1-minute bars. Missing minutes,
 duplicate `symbol + timestamp`, invalid OHLC, negative volume/value, and parse
 errors must be fixed before DB promotion.
 
+## Bar Continuity Policy
+
+Do not reject raw Daishin files only because `gap_count` is high. The collector
+may receive trade-event bars rather than a fully materialized every-minute grid,
+and sparse/illiquid symbols, suspensions, holidays, and non-session time can
+create legitimate gaps.
+
+Phase-2 uses three continuity layers:
+
+1. Raw intake: require parse success, no duplicate `symbol + timestamp`, and
+   record `gap_count`, `missing_minutes_count`, and `max_gap_minutes`.
+2. Strategy promotion: do not forward-fill individual stock prices for signal
+   generation by default. Missing stock bars mean "no fresh quote/no signal" for
+   that symbol until a later strategy explicitly opts into a fill policy.
+3. Trade audit: every backtest report records `trade_continuity` for entry and
+   exit timestamps. A trade whose entry or exit window has missing nearby bars is
+   evidence to review before using the result for strategy decisions.
+
+For the phase-2 short-term baseline, positions must not silently carry across
+sessions. The backtest engine liquidates open positions on the previous
+available bar before the next KST trading date and records the exit reason as
+`day-end`. Optional `max_holding_minutes` may be added in the backtest config
+when a stricter intraday holding cap is needed.
+
+Backtest reports also include `trade_continuity_summary`, which separates
+continuity-valid trades from continuity-invalid trades. Strategy conclusions
+must be based on the continuity-valid segment, not on aggregate PnL inflated by
+trades whose entry/exit windows failed the continuity audit.
+
+Index/regime data should be stricter than stock data. Once the Korean exchange
+calendar and session grid are encoded, index bars should use a high session
+coverage threshold before they are allowed to drive market-wide filters.
+
 ## Gate Command
 
 Use the scan gate before loading Postgres:
@@ -61,7 +94,15 @@ Use the scan gate before loading Postgres:
 
 Start without `--max-gap-count` until the exact Korean market session calendar
 is encoded for the acquired source. Once the calendar is explicit, add a strict
-gap threshold.
+gap threshold for index/regime data first, then a strategy-specific threshold
+for stock data. Use `--max-missing-minutes` and `--max-gap-minutes` only after
+deciding whether the target source represents every session minute or only
+trade-event bars.
+
+For large local datasets, prefer monthly scan jobs with durable logs instead of
+a full-root scan as the primary workflow. A full-root scan may be kept as a
+final reconciliation step, but progress tracking should be based on per-month
+start time, end time, exit code, and output artifact path.
 
 ## Smoke Backtest
 
@@ -76,7 +117,12 @@ After the intake report is accepted, run a small DB smoke:
 ```
 
 The smoke run proves file parsing, DB insert, DB fetch, strategy wiring, and
-report generation. It is not a profitability verdict.
+report generation. It also writes `trade_continuity` into `report.json` so
+entry/exit windows can be audited. It is not a profitability verdict.
+
+For real-data rehearsal beyond smoke size, select a contiguous completed month
+range and a stable common symbol set. Do not mix actively collecting partial
+months into strategy-performance interpretation.
 
 ## Stop Conditions
 
@@ -87,4 +133,8 @@ Stop and fix data before full promotion when:
 - Duplicate timestamps are non-zero.
 - The symbol or period count is lower than expected.
 - Index files and symbol metadata are missing for the intended strategy filter.
+- `trade_continuity.status` is `failed` for trades used in a strategy decision.
+- `trade_continuity_summary.invalid_trades` materially drives aggregate PnL.
+- Any trade meant to represent the short-term baseline exits after the entry
+  KST trading date without an explicit approved carry rule.
 - Report generation succeeds but the dataset coverage is visibly incomplete.

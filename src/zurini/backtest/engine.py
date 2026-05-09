@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
+from zoneinfo import ZoneInfo
 
 from zurini.market import BacktestReport, Bar, SignalIntent, Trade
 from zurini.strategies.baseline import RiskState, VwapFirstPullbackStrategy
@@ -25,6 +26,8 @@ class BacktestConfig:
     slippage_rate: Decimal = Decimal("0.00050")
     profit_target: Decimal = Decimal("0.03")
     hard_stop: Decimal = Decimal("-0.03")
+    day_end_exit: bool = True
+    max_holding_minutes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,8 @@ def run_backtest(
             slippage_rate=config.slippage_rate,
             profit_target=config.profit_target,
             hard_stop=config.hard_stop,
+            day_end_exit=config.day_end_exit,
+            max_holding_minutes=config.max_holding_minutes,
         )
         symbol_strategy = _new_strategy(
             strategy=strategy,
@@ -172,10 +177,33 @@ def _run_single_symbol(
     position_qty = Decimal("0")
     entry_price: Decimal | None = None
     entry_time = None
+    previous_bar: Bar | None = None
     trades: list[Trade] = []
     equity_curve: list[tuple[datetime, Decimal]] = []
 
     for index, bar in enumerate(ordered):
+        if (
+            position_qty > 0
+            and config.day_end_exit
+            and previous_bar is not None
+            and _session_date(previous_bar.timestamp) != _session_date(bar.timestamp)
+        ):
+            assert entry_price is not None
+            assert entry_time is not None
+            trade = _close_position(
+                bar=previous_bar,
+                entry_price=entry_price,
+                entry_time=entry_time,
+                position_qty=position_qty,
+                config=config,
+                reason="day-end",
+            )
+            cash += trade.exit_price * position_qty - (trade.exit_price * position_qty * config.fee_rate)
+            trades.append(trade)
+            position_qty = Decimal("0")
+            entry_price = None
+            entry_time = None
+
         effective_risk = risk or RiskState(blacklist_updated_at=bar.timestamp)
         if position_qty == 0:
             signal = strategy.on_bar(bar, effective_risk)
@@ -189,9 +217,11 @@ def _run_single_symbol(
                 equity_curve.append((bar.timestamp, cash + position_qty * bar.close))
             else:
                 equity_curve.append((bar.timestamp, cash))
+            previous_bar = bar
             continue
 
         assert entry_price is not None
+        assert entry_time is not None
         pnl_ratio = (bar.close - entry_price) / entry_price
         final_bar = index == len(ordered) - 1
         exit_reason = ""
@@ -199,6 +229,8 @@ def _run_single_symbol(
             exit_reason = "profit-target"
         elif pnl_ratio <= config.hard_stop:
             exit_reason = "hard-stop"
+        elif config.max_holding_minutes is not None and _holding_minutes(entry_time, bar.timestamp) >= config.max_holding_minutes:
+            exit_reason = "max-holding"
         elif final_bar:
             exit_reason = "end-of-test"
 
@@ -209,27 +241,20 @@ def _run_single_symbol(
         equity_curve.append((bar.timestamp, mark_equity))
 
         if exit_reason:
-            exit_price = bar.close * (Decimal("1") - config.slippage_rate)
-            gross_pnl = (exit_price - entry_price) * position_qty
-            fees = (entry_price + exit_price) * position_qty * config.fee_rate
-            net_pnl = gross_pnl - fees
-            cash += position_qty * exit_price - (exit_price * position_qty * config.fee_rate)
-            trades.append(
-                Trade(
-                    symbol=bar.symbol,
-                    entry_time=entry_time,
-                    exit_time=bar.timestamp,
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    quantity=position_qty,
-                    gross_pnl=gross_pnl,
-                    net_pnl=net_pnl,
-                    reason=exit_reason,
-                )
+            trade = _close_position(
+                bar=bar,
+                entry_price=entry_price,
+                entry_time=entry_time,
+                position_qty=position_qty,
+                config=config,
+                reason=exit_reason,
             )
+            cash += trade.exit_price * position_qty - (trade.exit_price * position_qty * config.fee_rate)
+            trades.append(trade)
             position_qty = Decimal("0")
             entry_price = None
             entry_time = None
+        previous_bar = bar
 
     gross_pnl = sum((trade.gross_pnl for trade in trades), Decimal("0"))
     net_pnl = sum((trade.net_pnl for trade in trades), Decimal("0"))
@@ -242,3 +267,39 @@ def _run_single_symbol(
         end_equity=config.start_equity + net_pnl,
     )
     return _SymbolRun(report=report, trades=trades, equity_curve=equity_curve)
+
+
+def _close_position(
+    *,
+    bar: Bar,
+    entry_price: Decimal,
+    entry_time: datetime,
+    position_qty: Decimal,
+    config: BacktestConfig,
+    reason: str,
+) -> Trade:
+    exit_price = bar.close * (Decimal("1") - config.slippage_rate)
+    gross_pnl = (exit_price - entry_price) * position_qty
+    fees = (entry_price + exit_price) * position_qty * config.fee_rate
+    net_pnl = gross_pnl - fees
+    return Trade(
+        symbol=bar.symbol,
+        entry_time=entry_time,
+        exit_time=bar.timestamp,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        quantity=position_qty,
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        reason=reason,
+    )
+
+
+def _session_date(timestamp: datetime):
+    if timestamp.tzinfo is None:
+        return timestamp.date()
+    return timestamp.astimezone(ZoneInfo("Asia/Seoul")).date()
+
+
+def _holding_minutes(entry_time: datetime, current_time: datetime) -> int:
+    return int((current_time - entry_time).total_seconds() // 60)

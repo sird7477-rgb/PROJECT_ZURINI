@@ -15,6 +15,8 @@ class CsvScanResult:
     row_count: int
     duplicate_timestamp_count: int
     gap_count: int
+    missing_minutes_count: int
+    max_gap_minutes: int
     zero_volume_count: int
     first_timestamp: str | None
     last_timestamp: str | None
@@ -34,6 +36,8 @@ class CsvScanSummary:
     row_count: int
     duplicate_timestamp_count: int
     gap_count: int
+    missing_minutes_count: int
+    max_gap_minutes: int
     zero_volume_count: int
     symbol_count: int
     period_count: int
@@ -64,6 +68,8 @@ def scan_daishin_csv_tree(root: Path | str, *, source: str = "sample") -> CsvSca
         row_count=sum(result.row_count for result in ok_results),
         duplicate_timestamp_count=sum(result.duplicate_timestamp_count for result in ok_results),
         gap_count=sum(result.gap_count for result in ok_results),
+        missing_minutes_count=sum(result.missing_minutes_count for result in ok_results),
+        max_gap_minutes=max((result.max_gap_minutes for result in ok_results), default=0),
         zero_volume_count=sum(result.zero_volume_count for result in ok_results),
         symbol_count=len({result.symbol for result in ok_results}),
         period_count=len({period for period in (_period_key(result.path) for result in ok_results) if period}),
@@ -94,6 +100,8 @@ def _scan_one(path: Path, *, source: str) -> CsvScanResult:
             row_count=report.row_count,
             duplicate_timestamp_count=report.duplicate_timestamp_count,
             gap_count=report.gap_count,
+            missing_minutes_count=report.missing_minutes_count,
+            max_gap_minutes=report.max_gap_minutes,
             zero_volume_count=report.zero_volume_count,
             first_timestamp=report.first_timestamp,
             last_timestamp=report.last_timestamp,
@@ -107,6 +115,8 @@ def _scan_one(path: Path, *, source: str) -> CsvScanResult:
             row_count=0,
             duplicate_timestamp_count=0,
             gap_count=0,
+            missing_minutes_count=0,
+            max_gap_minutes=0,
             zero_volume_count=0,
             first_timestamp=None,
             last_timestamp=None,

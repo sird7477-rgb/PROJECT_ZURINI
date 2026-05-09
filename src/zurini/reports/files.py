@@ -18,6 +18,7 @@ def write_backtest_outputs(
     symbols: list[str],
     inserted_rows: int,
     title: str = "PROJECT_ZURINI phase-1 dummy multi-symbol backtest",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -25,7 +26,7 @@ def write_backtest_outputs(
         "csv": output_dir / "trades.csv",
         "txt": output_dir / "summary.txt",
     }
-    _write_report_json(paths["json"], report, trades, symbols, inserted_rows)
+    _write_report_json(paths["json"], report, trades, symbols, inserted_rows, extra=extra)
     _write_trades_csv(paths["csv"], trades)
     _write_summary_txt(paths["txt"], report, symbols, inserted_rows, title)
     return paths
@@ -37,6 +38,7 @@ def _write_report_json(
     trades: list[Trade],
     symbols: list[str],
     inserted_rows: int,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "symbols": symbols,
@@ -44,6 +46,8 @@ def _write_report_json(
         "report": _json_safe(asdict(report)),
         "trades": [_json_safe(asdict(trade)) for trade in trades],
     }
+    if extra:
+        payload.update(_json_safe(extra))
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

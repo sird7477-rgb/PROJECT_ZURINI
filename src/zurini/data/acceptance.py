@@ -12,6 +12,8 @@ class CsvAcceptanceCriteria:
     max_error_count: int = 0
     max_duplicate_timestamp_count: int = 0
     max_gap_count: int | None = None
+    max_missing_minutes_count: int | None = None
+    max_gap_minutes: int | None = None
     max_zero_volume_count: int | None = None
     min_symbol_count: int | None = None
     min_period_count: int | None = None
@@ -46,6 +48,12 @@ def assess_csv_scan(summary: CsvScanSummary, criteria: CsvAcceptanceCriteria) ->
         )
     if criteria.max_gap_count is not None and summary.gap_count > criteria.max_gap_count:
         failures.append(f"gap_count {summary.gap_count} > {criteria.max_gap_count}")
+    if criteria.max_missing_minutes_count is not None and summary.missing_minutes_count > criteria.max_missing_minutes_count:
+        failures.append(
+            f"missing_minutes_count {summary.missing_minutes_count} > {criteria.max_missing_minutes_count}"
+        )
+    if criteria.max_gap_minutes is not None and summary.max_gap_minutes > criteria.max_gap_minutes:
+        failures.append(f"max_gap_minutes {summary.max_gap_minutes} > {criteria.max_gap_minutes}")
     if criteria.max_zero_volume_count is not None and summary.zero_volume_count > criteria.max_zero_volume_count:
         failures.append(f"zero_volume_count {summary.zero_volume_count} > {criteria.max_zero_volume_count}")
     if criteria.min_symbol_count is not None and summary.symbol_count < criteria.min_symbol_count:

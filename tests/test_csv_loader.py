@@ -28,6 +28,8 @@ def test_daishin_csv_loader_maps_file_contract_to_market_bars(tmp_path):
     assert bars[0].source == "sample"
     assert report.row_count == 2
     assert report.gap_count == 1
+    assert report.missing_minutes_count == 1
+    assert report.max_gap_minutes == 1
     assert report.zero_volume_count == 0
 
 
@@ -84,6 +86,8 @@ def test_csv_tree_scan_summarizes_ok_and_error_files(tmp_path):
     assert summary.success_rate == 0.5
     assert summary.row_count == 2
     assert summary.gap_count == 1
+    assert summary.missing_minutes_count == 1
+    assert summary.max_gap_minutes == 1
     assert summary.symbol_count == 1
     assert summary.period_count == 1
     assert summary.error_paths == [str(bad)]
@@ -269,6 +273,8 @@ def test_backtest_csv_cli_runs_sample_through_existing_engine(tmp_path):
 
     assert report["symbols"] == ["A000020"]
     assert report["inserted_rows"] == 4208
+    assert report["trade_continuity"]["status"] in {"passed", "failed"}
+    assert report["trade_continuity"]["window_minutes"] == 5
     assert "trade_count" in report["report"]
     assert quality[0]["symbol"] == "A000020"
     assert quality[0]["row_count"] == 4208

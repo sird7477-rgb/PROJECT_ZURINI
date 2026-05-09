@@ -6,10 +6,14 @@ fail() {
   exit 1
 }
 
+log() {
+  printf '[verify] %s %s\n' "$(date -Is)" "$*"
+}
+
 require_file() {
   local path="$1"
   [ -f "$path" ] || fail "missing required file: ${path}"
-  echo "[verify] file ok: ${path}"
+  log "file ok: ${path}"
 }
 
 require_text() {
@@ -18,22 +22,46 @@ require_text() {
   if ! grep -Fq "$pattern" "$path"; then
     fail "missing expected text in ${path}: ${pattern}"
   fi
-  echo "[verify] anchor ok: ${path} :: ${pattern}"
+  log "anchor ok: ${path} :: ${pattern}"
 }
 
 require_absent_text() {
   local pattern="$1"
-  if grep -R -F -q \
-    --exclude=".env" \
-    --exclude-dir=".git" \
-    --exclude-dir=".omx" \
-    --exclude-dir=".venv" \
-    --exclude-dir=".pytest_cache" \
-    --exclude-dir="__pycache__" \
-    "$pattern" .; then
+  local label="$2"
+  local index="$3"
+  local total="$4"
+  local path
+  local found=0
+  local scan_list
+  log "sensitive scan ${index}/${total} start: ${label}"
+
+  # Scope the secret scan to files that can be committed: tracked files plus
+  # untracked files not ignored by .gitignore. Large ignored raw-data/report
+  # trees are intentionally excluded from this repository-persistence gate.
+  scan_list="$(mktemp)"
+  git ls-files --cached --others --exclude-standard -z > "$scan_list" || fail "failed to enumerate git candidate files"
+  while IFS= read -r -d '' path; do
+    if [ "$path" = ".env" ]; then
+      continue
+    fi
+    if grep -F -q -- "$pattern" "$path"; then
+      found=1
+      break
+    fi
+  done < "$scan_list"
+  rm -f "$scan_list"
+
+  if [ "$found" -eq 1 ]; then
     fail "sensitive literal must not be stored in repository files"
   fi
-  echo "[verify] sensitive literal absent"
+  log "sensitive scan ${index}/${total} ok: ${label}"
+}
+
+require_env_not_tracked() {
+  if git ls-files --cached --error-unmatch .env >/dev/null 2>&1; then
+    fail ".env must not be tracked or staged"
+  fi
+  log ".env not tracked or staged"
 }
 
 require_executable_script() {
@@ -47,18 +75,19 @@ require_executable_script() {
     fail "script is not executable in git index: ${path} (${index_mode})"
   fi
 
-  echo "[verify] executable ok: ${path}"
+  log "executable ok: ${path}"
 }
 
-echo "[verify] checking review summary fixture logic..."
+log "start"
+log "checking review summary fixture logic..."
 ./scripts/test-review-summary.sh
 
 echo
-echo "[verify] checking automation files..."
+log "checking automation files..."
 DOCTOR_SKIP_DIRTY_CHECK=1 ./scripts/automation-doctor.sh
 
 echo
-echo "[verify] checking PROJECT_ZURINI onboarding baseline..."
+log "checking PROJECT_ZURINI onboarding baseline..."
 require_file "AGENTS.md"
 require_file "docs/WORKFLOW.md"
 require_file "docs/phase-1-development.md"
@@ -165,16 +194,17 @@ require_text ".env.example" "GEMINI_API_KEY="
 require_text ".env.example" "KIS_LIVE_APP_SECRET="
 
 echo
-echo "[verify] checking that provided secret literals are not persisted..."
-require_absent_text "AI""za"
-require_absent_text "AAH""x3"
-require_absent_text "PSH""Slf"
-require_absent_text "PS9""KYZ"
-require_absent_text "fly""lmj"
-require_absent_text "373""69c"
+log "checking that provided secret literals are not persisted..."
+require_env_not_tracked
+require_absent_text "AI""za" "gemini key prefix" 1 6
+require_absent_text "AAH""x3" "telegram token prefix" 2 6
+require_absent_text "PSH""Slf" "KIS live app key prefix" 3 6
+require_absent_text "PS9""KYZ" "KIS paper app key prefix" 4 6
+require_absent_text "fly""lmj" "daishin id literal" 5 6
+require_absent_text "373""69c" "daishin password/cert prefix" 6 6
 
 echo
-echo "[verify] checking archived old-document baseline anchors..."
+log "checking archived old-document baseline anchors..."
 # These anchors intentionally pin the phase-1 starting baseline to representative
 # archived strategy, sequence, risk, and architecture concepts.
 require_text "(old)/# [자동매매 전략 기획서].md" "단타 전략"
@@ -184,21 +214,22 @@ require_text "(old)/[자동매매_시퀀스_다이어그램].md" "Async NLP Blac
 require_text "(old)/[자동매매_통합_아키텍처_설계서].md" "Universal Quant Core"
 
 echo
-echo "[verify] starting local Postgres..."
+log "starting local Postgres..."
 docker compose up -d db
 for attempt in $(seq 1 30); do
   if docker compose exec -T db pg_isready -U zurini -d zurini >/dev/null 2>&1; then
-    echo "[verify] Postgres ready"
+    log "Postgres ready on attempt ${attempt}/30"
     break
   fi
   if [ "$attempt" -eq 30 ]; then
     fail "Postgres did not become ready"
   fi
+  log "Postgres not ready yet: attempt ${attempt}/30"
   sleep 1
 done
 
 echo
-echo "[verify] running pytest..."
+log "running pytest..."
 if [ -x ".venv/bin/python" ]; then
   .venv/bin/python -m pytest
 else
@@ -206,4 +237,4 @@ else
 fi
 
 echo
-echo "[verify] success"
+log "success"

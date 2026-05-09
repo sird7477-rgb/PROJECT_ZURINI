@@ -22,6 +22,8 @@ class CsvQualityReport:
     row_count: int
     duplicate_timestamp_count: int
     gap_count: int
+    missing_minutes_count: int
+    max_gap_minutes: int
     zero_volume_count: int
     first_timestamp: str | None
     last_timestamp: str | None
@@ -61,9 +63,16 @@ def build_csv_quality_report(
         by_symbol_day[(bar.symbol, bar.timestamp.strftime("%Y%m%d"))].append(bar.timestamp)
 
     gap_count = 0
+    missing_minutes_count = 0
+    max_gap_minutes = 0
     for day_timestamps in by_symbol_day.values():
         ordered = sorted(day_timestamps)
-        gap_count += sum(1 for left, right in zip(ordered, ordered[1:]) if (right - left).total_seconds() > 60)
+        for left, right in zip(ordered, ordered[1:]):
+            gap_minutes = int((right - left).total_seconds() // 60) - 1
+            if gap_minutes > 0:
+                gap_count += 1
+                missing_minutes_count += gap_minutes
+                max_gap_minutes = max(max_gap_minutes, gap_minutes)
 
     inferred_symbol = symbol or (sorted_bars[0].symbol if sorted_bars else source_path.stem)
     return CsvQualityReport(
@@ -72,6 +81,8 @@ def build_csv_quality_report(
         row_count=len(sorted_bars),
         duplicate_timestamp_count=duplicate_count,
         gap_count=gap_count,
+        missing_minutes_count=missing_minutes_count,
+        max_gap_minutes=max_gap_minutes,
         zero_volume_count=zero_volume_count,
         first_timestamp=timestamps[0].isoformat() if timestamps else None,
         last_timestamp=timestamps[-1].isoformat() if timestamps else None,

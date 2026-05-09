@@ -10,6 +10,7 @@ fee_rate = "0.00015"
 slippage_rate = "0.00050"
 profit_target = "0.03"
 hard_stop = "-0.03"
+day_end_exit = true
 
 [output]
 directory = "reports/phase-1"

@@ -12,6 +12,7 @@ from zurini.backtest.engine import BacktestConfig, run_backtest
 from zurini.api_smoke import build_api_smoke_plan, run_api_smoke_network
 from zurini.data import db
 from zurini.data.acceptance import CsvAcceptanceCriteria, assess_csv_scan
+from zurini.data.continuity import assess_trade_continuity, summarize_trades_by_continuity
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
 from zurini.data.csv_quality import CsvScanSummary, discover_daishin_csv_paths, scan_daishin_csv_tree
 from zurini.data.dummy import generate_dummy_bars
@@ -98,6 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_csv.add_argument("--max-error-count", type=int, default=0)
     scan_csv.add_argument("--max-duplicate-timestamps", type=int, default=0)
     scan_csv.add_argument("--max-gap-count", type=int)
+    scan_csv.add_argument("--max-missing-minutes", type=int)
+    scan_csv.add_argument("--max-gap-minutes", type=int)
     scan_csv.add_argument("--max-zero-volume-count", type=int)
     scan_csv.add_argument("--min-symbols", type=int)
     scan_csv.add_argument("--min-periods", type=int)
@@ -228,6 +231,8 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
             loaded_from_db.extend(db.fetch_bars(symbol))
 
     report, trades = run_backtest(loaded_from_db, config=config.backtest)
+    continuity = assess_trade_continuity(loaded_from_db, trades)
+    continuity_trades = summarize_trades_by_continuity(trades, continuity)
     outputs = write_backtest_outputs(
         report=report,
         trades=trades,
@@ -235,6 +240,10 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
         symbols=report_symbols,
         inserted_rows=inserted,
         title="PROJECT_ZURINI phase-1 CSV sample backtest",
+        extra={
+            "trade_continuity": continuity.as_dict(),
+            "trade_continuity_summary": continuity_trades.as_dict(),
+        },
     )
     quality_path = args.output_dir / "csv-quality.json"
     quality_path.write_text(
@@ -286,6 +295,8 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
     print(f"period_count={summary.period_count}")
     print(f"row_count={summary.row_count}")
     print(f"gap_count={summary.gap_count}")
+    print(f"missing_minutes_count={summary.missing_minutes_count}")
+    print(f"max_gap_minutes={summary.max_gap_minutes}")
     print(f"report={args.output}")
     if args.acceptance_report:
         print(f"acceptance_status={acceptance.status if acceptance else 'not-run'}")
@@ -320,6 +331,8 @@ def _csv_acceptance_result(args: argparse.Namespace, summary: CsvScanSummary):
         max_error_count=args.max_error_count,
         max_duplicate_timestamp_count=args.max_duplicate_timestamps,
         max_gap_count=args.max_gap_count,
+        max_missing_minutes_count=args.max_missing_minutes,
+        max_gap_minutes=args.max_gap_minutes,
         max_zero_volume_count=args.max_zero_volume_count,
         min_symbol_count=args.min_symbols,
         min_period_count=args.min_periods,
@@ -424,6 +437,12 @@ def load_config(path: Path, *, output_dir: Path | None = None) -> Phase1Config:
             slippage_rate=_decimal(backtest.get("slippage_rate", "0.00050")),
             profit_target=_decimal(backtest.get("profit_target", "0.03")),
             hard_stop=_decimal(backtest.get("hard_stop", "-0.03")),
+            day_end_exit=_bool(backtest.get("day_end_exit", True)),
+            max_holding_minutes=(
+                int(backtest["max_holding_minutes"])
+                if backtest.get("max_holding_minutes") is not None
+                else None
+            ),
         ),
         output_dir=output_dir or Path(output.get("directory", "reports/phase-1")),
     )
@@ -445,6 +464,14 @@ def generate_configured_dummy_bars(config: DummyConfig) -> list[Bar]:
 
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
+
+
+def _bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _csv_paths(paths: list[Path], roots: list[Path]) -> list[Path]:

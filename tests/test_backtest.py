@@ -144,3 +144,99 @@ def test_multi_symbol_run_rejects_shared_strategy_instance():
 
     with pytest.raises(ValueError, match="strategy_factory"):
         run_backtest(bars, strategy=object())
+
+
+def test_backtest_liquidates_open_positions_at_day_end_before_next_session():
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    bars = [
+        Bar("FIXTURE", start, money(100), money(100), money(100), money(100), 1, money(100)),
+        Bar(
+            "FIXTURE",
+            start.replace(hour=15, minute=30),
+            money(101),
+            money(101),
+            money(101),
+            money(101),
+            1,
+            money(101),
+        ),
+        Bar(
+            "FIXTURE",
+            start + timedelta(days=1),
+            money(102),
+            money(102),
+            money(102),
+            money(102),
+            1,
+            money(102),
+        ),
+    ]
+
+    report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(
+            start_equity=Decimal("1000"),
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            profit_target=Decimal("0.50"),
+            hard_stop=Decimal("-0.50"),
+        ),
+    )
+
+    assert report.trade_count == 1
+    assert trades[0].reason == "day-end"
+    assert trades[0].exit_time == start.replace(hour=15, minute=30)
+
+
+def test_backtest_can_liquidate_after_configured_max_holding_minutes():
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    bars = [
+        Bar("FIXTURE", start, money(100), money(100), money(100), money(100), 1, money(100)),
+        Bar(
+            "FIXTURE",
+            start + timedelta(minutes=3),
+            money(100),
+            money(100),
+            money(100),
+            money(100),
+            1,
+            money(100),
+        ),
+    ]
+
+    report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(
+            start_equity=Decimal("1000"),
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            profit_target=Decimal("0.50"),
+            hard_stop=Decimal("-0.50"),
+            max_holding_minutes=3,
+        ),
+    )
+
+    assert report.trade_count == 1
+    assert trades[0].reason == "max-holding"
