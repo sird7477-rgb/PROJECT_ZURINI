@@ -55,7 +55,11 @@ def test_phase15_large_dummy_rehearsal_cli_writes_profile_report(tmp_path):
 
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     assert payload["purpose"] == "phase-1.5 synthetic system rehearsal; not strategy profitability evidence"
-    assert payload["real_data_source_boundary"] == "future real data source is Korea Investment Securities only"
+    assert payload["real_data_source_boundary"] == (
+        "promoted stage/API data source is Korea Investment Securities only; "
+        "two-year historical raw acquisition may use Daishin Securities CYBOS "
+        "only as unpromoted read-only intake"
+    )
     assert payload["profile"]["name"] == "smoke"
     assert payload["profile"]["logical_months"] == 24
     assert payload["profile"]["market_bar_count"] == 2304

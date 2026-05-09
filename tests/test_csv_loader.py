@@ -111,6 +111,105 @@ def test_scan_csv_cli_writes_json_report(tmp_path):
     assert payload["row_count"] == 1
 
 
+def test_scan_csv_cli_without_acceptance_report_keeps_plain_scan_output(tmp_path):
+    csv_path = tmp_path / "A111111.csv"
+    output = tmp_path / "scan.json"
+    csv_path.write_text(
+        "date,time,open,high,low,close,volume\n"
+        "20250401,901,100,110,100,105,10\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["scan-csv", "--root", str(tmp_path), "--output", str(output)])
+
+    assert exit_code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert "acceptance" not in payload
+    assert payload["error_count"] == 0
+
+
+def test_scan_csv_cli_without_acceptance_report_still_fails_bad_csv(tmp_path):
+    csv_path = tmp_path / "bad.csv"
+    output = tmp_path / "scan.json"
+    csv_path.write_text("date,time,open\n20250401,901,100\n", encoding="utf-8")
+
+    exit_code = main(["scan-csv", "--root", str(tmp_path), "--output", str(output)])
+
+    assert exit_code == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["error_count"] == 1
+    assert payload["error_paths"] == [str(csv_path)]
+
+
+def test_scan_csv_cli_writes_phase_two_acceptance_report(tmp_path):
+    first = tmp_path / "202504" / "A111111.csv"
+    second = tmp_path / "202505" / "A222222.csv"
+    output = tmp_path / "scan.json"
+    acceptance = tmp_path / "acceptance.json"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    for path in (first, second):
+        path.write_text(
+            "date,time,open,high,low,close,volume\n"
+            "20250401,901,100,110,100,105,10\n",
+            encoding="utf-8",
+        )
+
+    exit_code = main(
+        [
+            "scan-csv",
+            "--root",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--acceptance-report",
+            str(acceptance),
+            "--min-symbols",
+            "2",
+            "--min-periods",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(acceptance.read_text(encoding="utf-8"))
+    assert payload["purpose"] == "phase-2 real-data intake gate before DB promotion"
+    assert payload["real_data_source_boundary"] == (
+        "promoted stage/API data source is Korea Investment Securities only; "
+        "two-year historical raw acquisition may use Daishin Securities CYBOS "
+        "only as unpromoted read-only intake"
+    )
+    assert payload["acceptance"]["status"] == "accepted"
+    assert payload["acceptance"]["failures"] == []
+
+
+def test_scan_csv_cli_rejects_acceptance_threshold_failures(tmp_path):
+    csv_path = tmp_path / "A111111.csv"
+    acceptance = tmp_path / "acceptance.json"
+    csv_path.write_text(
+        "date,time,open,high,low,close,volume\n"
+        "20250401,901,100,110,100,105,10\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "scan-csv",
+            "--root",
+            str(tmp_path),
+            "--acceptance-report",
+            str(acceptance),
+            "--min-symbols",
+            "2",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(acceptance.read_text(encoding="utf-8"))
+    assert payload["acceptance"]["status"] == "rejected"
+    assert payload["acceptance"]["failures"] == ["symbol_count 1 < 2"]
+
+
 def test_csv_path_discovery_accepts_files_and_directory_trees(tmp_path):
     first = tmp_path / "202504" / "A111111.csv"
     second = tmp_path / "202505" / "A222222.csv"

@@ -6,7 +6,7 @@ Phase 1.5 rehearses the future real-data stage with synthetic data. It stress
 checks schema, ingestion, quality gates, backtest wiring, and report generation
 without claiming strategy profitability.
 
-Future real market data source boundary: Korea Investment Securities only. This
+Future real market-data/API boundary: Korea Investment Securities only. This
 rehearsal does not introduce KRX, Naver, alternate vendors, broker API calls,
 paper trading, live orders, or server deployment.
 

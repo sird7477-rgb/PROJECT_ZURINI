@@ -190,7 +190,11 @@ def summarize_large_dummy_profile(
 ) -> dict[str, Any]:
     payload = {
         "purpose": "phase-1.5 synthetic system rehearsal; not strategy profitability evidence",
-        "real_data_source_boundary": "future real data source is Korea Investment Securities only",
+        "real_data_source_boundary": (
+            "promoted stage/API data source is Korea Investment Securities only; "
+            "two-year historical raw acquisition may use Daishin Securities CYBOS "
+            "only as unpromoted read-only intake"
+        ),
         "resource_target": {
             "cpu": "13th Gen Intel Core i5-13420H",
             "ram_gb": 16,

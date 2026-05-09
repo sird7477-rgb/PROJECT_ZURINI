@@ -9,9 +9,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from zurini.backtest.engine import BacktestConfig, run_backtest
+from zurini.api_smoke import build_api_smoke_plan
 from zurini.data import db
+from zurini.data.acceptance import CsvAcceptanceCriteria, assess_csv_scan
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
-from zurini.data.csv_quality import discover_daishin_csv_paths, scan_daishin_csv_tree
+from zurini.data.csv_quality import CsvScanSummary, discover_daishin_csv_paths, scan_daishin_csv_tree
 from zurini.data.dummy import generate_dummy_bars
 from zurini.data.large_dummy import (
     PROFILES,
@@ -53,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_backtest_csv_command(args)
     if args.command == "scan-csv":
         return run_scan_csv_command(args)
+    if args.command == "api-smoke":
+        return run_api_smoke_command(args)
     if args.command == "rehearse-large-dummy":
         return run_rehearse_large_dummy_command(args)
     parser.print_help()
@@ -89,6 +93,22 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_csv.add_argument("--root", type=Path, required=True, help="CSV file or directory tree")
     scan_csv.add_argument("--source", default="sample")
     scan_csv.add_argument("--output", type=Path, default=Path("reports/csv-scan.json"))
+    scan_csv.add_argument("--acceptance-report", type=Path, help="write a phase-2 data acceptance report")
+    scan_csv.add_argument("--min-success-rate", type=float, default=1.0)
+    scan_csv.add_argument("--max-error-count", type=int, default=0)
+    scan_csv.add_argument("--max-duplicate-timestamps", type=int, default=0)
+    scan_csv.add_argument("--max-gap-count", type=int)
+    scan_csv.add_argument("--max-zero-volume-count", type=int)
+    scan_csv.add_argument("--min-symbols", type=int)
+    scan_csv.add_argument("--min-periods", type=int)
+
+    api_smoke = subparsers.add_parser("api-smoke", help="write a read-only API smoke-test plan")
+    api_smoke.add_argument("--output", type=Path, default=Path("reports/api-smoke-plan.json"))
+    api_smoke.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="mark probes network-capable when required environment variables exist; no orders are allowed",
+    )
 
     rehearse = subparsers.add_parser(
         "rehearse-large-dummy",
@@ -226,6 +246,27 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
     summary = scan_daishin_csv_tree(args.root, source=args.source)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    acceptance = _csv_acceptance_result(args, summary) if args.acceptance_report else None
+    if args.acceptance_report:
+        args.acceptance_report.parent.mkdir(parents=True, exist_ok=True)
+        args.acceptance_report.write_text(
+            json.dumps(
+                {
+                    "purpose": "phase-2 real-data intake gate before DB promotion",
+                    "real_data_source_boundary": (
+                        "promoted stage/API data source is Korea Investment Securities only; "
+                        "two-year historical raw acquisition may use Daishin Securities CYBOS "
+                        "only as unpromoted read-only intake"
+                    ),
+                    "scan": summary.as_dict(),
+                    "acceptance": acceptance.as_dict() if acceptance else None,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     print(f"root={summary.root}")
     print(f"file_count={summary.file_count}")
@@ -237,7 +278,36 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
     print(f"row_count={summary.row_count}")
     print(f"gap_count={summary.gap_count}")
     print(f"report={args.output}")
+    if args.acceptance_report:
+        print(f"acceptance_status={acceptance.status if acceptance else 'not-run'}")
+        print(f"acceptance_report={args.acceptance_report}")
+    if acceptance:
+        return 0 if acceptance.accepted else 1
     return 1 if summary.error_count else 0
+
+
+def run_api_smoke_command(args: argparse.Namespace) -> int:
+    payload = build_api_smoke_plan(allow_network=args.allow_network)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    print(f"status={payload['status']}")
+    print(f"mode={payload['mode']}")
+    print(f"report={args.output}")
+    return 0 if payload["status"] == "ready" or not args.allow_network else 1
+
+
+def _csv_acceptance_result(args: argparse.Namespace, summary: CsvScanSummary):
+    criteria = CsvAcceptanceCriteria(
+        min_success_rate=args.min_success_rate,
+        max_error_count=args.max_error_count,
+        max_duplicate_timestamp_count=args.max_duplicate_timestamps,
+        max_gap_count=args.max_gap_count,
+        max_zero_volume_count=args.max_zero_volume_count,
+        min_symbol_count=args.min_symbols,
+        min_period_count=args.min_periods,
+    )
+    return assess_csv_scan(summary, criteria)
 
 
 def run_rehearse_large_dummy_command(args: argparse.Namespace) -> int:
