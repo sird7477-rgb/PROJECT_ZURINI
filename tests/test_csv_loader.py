@@ -304,9 +304,36 @@ def test_backtest_csv_cli_can_limit_discovered_files(tmp_path):
     assert report["inserted_rows"] == 4208
 
 
+@pytest.mark.integration
+def test_backtest_csv_cli_accepts_path_list(tmp_path):
+    output_dir = tmp_path / "sample-backtest-path-list"
+    path_list = tmp_path / "paths.txt"
+    path_list.write_text("sample/A000020.csv\n", encoding="utf-8")
+
+    exit_code = main(["backtest-csv", "--path-list", str(path_list), "--output-dir", str(output_dir)])
+
+    assert exit_code == 0
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["symbols"] == ["A000020"]
+    assert report["inserted_rows"] == 4208
+
+
 def test_backtest_csv_cli_rejects_root_with_symbol_overrides(tmp_path):
     with pytest.raises(ValueError, match="--symbol overrides are only supported"):
         main(["backtest-csv", "--root", "sample", "--symbol", "A000020", "--output-dir", str(tmp_path)])
+
+
+def test_backtest_csv_cli_rejects_missing_path_list(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        main(["backtest-csv", "--path-list", str(tmp_path / "missing.txt"), "--output-dir", str(tmp_path)])
+
+
+def test_backtest_csv_cli_rejects_empty_path_list(tmp_path):
+    path_list = tmp_path / "paths.txt"
+    path_list.write_text("\n# only comments\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least one --path or --root is required"):
+        main(["backtest-csv", "--path-list", str(path_list), "--output-dir", str(tmp_path)])
 
 
 @pytest.mark.integration

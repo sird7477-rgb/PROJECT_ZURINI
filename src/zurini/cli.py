@@ -25,6 +25,7 @@ from zurini.data.large_dummy import (
     summarize_large_dummy_profile,
 )
 from zurini.market import Bar
+from zurini.phase2 import build_monthly_rehearsal_plan, read_path_list, write_monthly_rehearsal_plan
 from zurini.reports.files import write_backtest_outputs
 
 DEFAULT_CONFIG = Path("config/phase1-backtest.toml")
@@ -56,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_backtest_csv_command(args)
     if args.command == "scan-csv":
         return run_scan_csv_command(args)
+    if args.command == "phase2-monthly-plan":
+        return run_phase2_monthly_plan_command(args)
     if args.command == "api-smoke":
         return run_api_smoke_command(args)
     if args.command == "rehearse-large-dummy":
@@ -83,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest_csv = subparsers.add_parser("backtest-csv", help="run a backtest from Daishin/CYBOS minute CSV files")
     backtest_csv.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     backtest_csv.add_argument("--path", type=Path, action="append", default=[])
+    backtest_csv.add_argument("--path-list", type=Path, action="append", default=[], help="newline-delimited CSV paths")
     backtest_csv.add_argument("--root", type=Path, action="append", default=[], help="CSV file or directory tree")
     backtest_csv.add_argument("--symbol", action="append", help="symbol override matching each --path; defaults to file stems")
     backtest_csv.add_argument("--source", default="sample")
@@ -104,6 +108,16 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_csv.add_argument("--max-zero-volume-count", type=int)
     scan_csv.add_argument("--min-symbols", type=int)
     scan_csv.add_argument("--min-periods", type=int)
+
+    phase2_plan = subparsers.add_parser(
+        "phase2-monthly-plan",
+        help="prepare a phase-2 completed-month path list and backtest command",
+    )
+    phase2_plan.add_argument("--root", type=Path, default=Path("data/raw/daishin/minute-bars"))
+    phase2_plan.add_argument("--output-dir", type=Path, default=Path("reports/phase2/monthly-rehearsal"))
+    phase2_plan.add_argument("--current-yyyymm", help="override current month boundary for tests/replays")
+    phase2_plan.add_argument("--limit-symbols", type=int, default=100)
+    phase2_plan.add_argument("--month", action="append", help="restrict to specific completed YYYYMM periods")
 
     api_smoke = subparsers.add_parser("api-smoke", help="write a read-only API smoke-test plan")
     api_smoke.add_argument("--output", type=Path, default=Path("reports/api-smoke-plan.json"))
@@ -207,7 +221,7 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
     config = load_config(args.config, output_dir=args.output_dir)
     if args.root and args.symbol:
         raise ValueError("--symbol overrides are only supported with explicit --path arguments")
-    paths = _csv_paths(args.path, args.root)
+    paths = _csv_paths(args.path, args.root, args.path_list)
     if args.limit_files is not None:
         paths = paths[: args.limit_files]
     symbols = _csv_symbols(paths, args.symbol)
@@ -304,6 +318,28 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
     if acceptance:
         return 0 if acceptance.accepted else 1
     return 1 if summary.error_count else 0
+
+
+def run_phase2_monthly_plan_command(args: argparse.Namespace) -> int:
+    plan = build_monthly_rehearsal_plan(
+        args.root,
+        output_dir=args.output_dir,
+        current_yyyymm=args.current_yyyymm,
+        limit_symbols=args.limit_symbols,
+        requested_months=args.month,
+    )
+    outputs = write_monthly_rehearsal_plan(plan)
+
+    print(f"root={plan.root}")
+    print(f"month_count={len(plan.months)}")
+    print(f"selected_months={','.join(plan.selected_months)}")
+    print(f"excluded_months={','.join(plan.excluded_months)}")
+    print(f"selected_symbol_count={len(plan.selected_symbols)}")
+    print(f"path_count={len(plan.path_list)}")
+    print(f"plan={outputs['plan']}")
+    print(f"path_list={outputs['path_list']}")
+    print("recommended_command=" + " ".join(plan.recommended_command))
+    return 0 if plan.selected_months and plan.selected_symbols else 1
 
 
 def run_api_smoke_command(args: argparse.Namespace) -> int:
@@ -474,8 +510,10 @@ def _bool(value: object) -> bool:
     return bool(value)
 
 
-def _csv_paths(paths: list[Path], roots: list[Path]) -> list[Path]:
+def _csv_paths(paths: list[Path], roots: list[Path], path_lists: list[Path] | None = None) -> list[Path]:
     resolved = list(paths)
+    for path_list in path_lists or []:
+        resolved.extend(read_path_list(path_list))
     for root in roots:
         resolved.extend(discover_daishin_csv_paths(root))
     if not resolved:
