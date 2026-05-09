@@ -4,7 +4,7 @@ from zurini.data.csv_quality import CsvScanSummary
 
 def _summary(**overrides):
     values = {
-        "root": "data/raw/kis/minute-bars",
+        "root": "data/raw/daishin/minute-bars",
         "file_count": 2,
         "ok_count": 2,
         "error_count": 0,

@@ -13,8 +13,8 @@ profitability.
 - If old files conflict, prefer the newest saved file unless implementation
   evidence strongly supports a different interpretation.
 - Record any AI-chosen exception in current docs before coding it.
-- Keep thresholds flexible until the real two-year Korea Investment Securities
-  minute dataset has been tested.
+- Keep thresholds flexible until the real two-year Daishin CYBOS raw minute
+  dataset has passed the intake gate and been tested.
 
 ## Current Minimum Inputs
 

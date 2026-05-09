@@ -5,7 +5,9 @@ not a marketing summary.
 
 ## Dataset
 
-- Source: Korea Investment Securities historical market data
+- Source: Daishin Securities CYBOS historical raw market data
+- Promoted/API boundary: Korea Investment Securities only unless separately
+  changed by the owner
 - Coverage: `<start>` to `<end>`
 - Symbols: `<count>`
 - Index series: `<codes>`

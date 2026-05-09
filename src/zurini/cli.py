@@ -141,15 +141,16 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     config = load_config(args.config, output_dir=args.output_dir)
     bars = generate_configured_dummy_bars(config.dummy)
 
-    if args.keep_db:
-        db.apply_schema()
-    else:
-        db.reset_market_bars()
-    inserted = db.insert_bars(bars)
+    with db.workflow_lock():
+        if args.keep_db:
+            db.apply_schema()
+        else:
+            db.reset_market_bars()
+        inserted = db.insert_bars(bars)
 
-    loaded: list[Bar] = []
-    for symbol in config.dummy.symbols:
-        loaded.extend(db.fetch_bars(symbol))
+        loaded: list[Bar] = []
+        for symbol in config.dummy.symbols:
+            loaded.extend(db.fetch_bars(symbol))
 
     report, trades = run_backtest(loaded, config=config.backtest)
     outputs = write_backtest_outputs(
@@ -172,11 +173,12 @@ def run_load_sample_command(args: argparse.Namespace) -> int:
     bars = load_daishin_minute_csv(args.path, symbol=args.symbol, source=args.source)
     report = build_csv_quality_report(bars, source_path=args.path, symbol=args.symbol, source=args.source)
 
-    if args.keep_db:
-        db.apply_schema()
-    else:
-        db.reset_market_bars()
-    inserted = db.insert_bars(bars)
+    with db.workflow_lock():
+        if args.keep_db:
+            db.apply_schema()
+        else:
+            db.reset_market_bars()
+        inserted = db.insert_bars(bars)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.output_dir / "sample-quality.json"
@@ -208,15 +210,16 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
         bars.extend(loaded)
         quality_reports.append(build_csv_quality_report(loaded, source_path=path, symbol=symbol, source=args.source))
 
-    if args.keep_db:
-        db.apply_schema()
-    else:
-        db.reset_market_bars()
-    inserted = db.insert_bars(bars)
+    with db.workflow_lock():
+        if args.keep_db:
+            db.apply_schema()
+        else:
+            db.reset_market_bars()
+        inserted = db.insert_bars(bars)
 
-    loaded_from_db: list[Bar] = []
-    for symbol in report_symbols:
-        loaded_from_db.extend(db.fetch_bars(symbol))
+        loaded_from_db: list[Bar] = []
+        for symbol in report_symbols:
+            loaded_from_db.extend(db.fetch_bars(symbol))
 
     report, trades = run_backtest(loaded_from_db, config=config.backtest)
     outputs = write_backtest_outputs(
@@ -326,21 +329,22 @@ def run_rehearse_large_dummy_command(args: argparse.Namespace) -> int:
     inserted_metadata_rows = 0
 
     if not args.dry_run:
-        if args.keep_db:
-            db.apply_schema()
-        else:
-            db.reset_rehearsal_tables()
-        inserted_metadata_rows = db.insert_symbol_metadata(metadata)
-        inserted_market_rows = db.insert_bars(
-            iter_large_dummy_market_bars(
-                profile,
-                include_quality_anomalies=args.include_quality_anomalies,
+        with db.workflow_lock():
+            if args.keep_db:
+                db.apply_schema()
+            else:
+                db.reset_rehearsal_tables()
+            inserted_metadata_rows = db.insert_symbol_metadata(metadata)
+            inserted_market_rows = db.insert_bars(
+                iter_large_dummy_market_bars(
+                    profile,
+                    include_quality_anomalies=args.include_quality_anomalies,
+                )
             )
-        )
-        inserted_index_rows = db.insert_index_bars(iter_large_dummy_index_bars(profile))
-        backtest_bars: list[Bar] = []
-        for item in metadata:
-            backtest_bars.extend(db.fetch_bars(item.symbol))
+            inserted_index_rows = db.insert_index_bars(iter_large_dummy_index_bars(profile))
+            backtest_bars: list[Bar] = []
+            for item in metadata:
+                backtest_bars.extend(db.fetch_bars(item.symbol))
         report, trades = run_backtest(backtest_bars, config=config.backtest)
         outputs = write_backtest_outputs(
             report=report,

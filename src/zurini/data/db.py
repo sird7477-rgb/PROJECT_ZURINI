@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 from typing import Iterable
@@ -14,6 +16,8 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE_URL = "postgresql://zurini:zurini@localhost:55432/zurini"
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+WORKFLOW_LOCK_ID = 7477001
+DEFAULT_WORKFLOW_LOCK_TIMEOUT_SECONDS = 120.0
 
 
 def database_url() -> str:
@@ -24,6 +28,23 @@ def _connect():
     import psycopg
 
     return psycopg.connect(database_url())
+
+
+@contextmanager
+def workflow_lock(timeout_seconds: float = DEFAULT_WORKFLOW_LOCK_TIMEOUT_SECONDS):
+    with _connect() as conn:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            acquired = conn.execute("SELECT pg_try_advisory_lock(%s)", (WORKFLOW_LOCK_ID,)).fetchone()[0]
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("another Zurini database workflow is already running")
+            time.sleep(0.25)
+        try:
+            yield
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (WORKFLOW_LOCK_ID,))
 
 
 def apply_schema() -> None:

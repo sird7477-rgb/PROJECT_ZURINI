@@ -48,6 +48,22 @@ def test_schema_rejects_duplicate_symbol_timestamp():
         db.insert_bars([bars[0]])
 
 
+def test_workflow_lock_releases_after_exception():
+    with pytest.raises(RuntimeError, match="sentinel"):
+        with db.workflow_lock(timeout_seconds=0):
+            raise RuntimeError("sentinel")
+
+    with db.workflow_lock(timeout_seconds=0):
+        pass
+
+
+def test_workflow_lock_times_out_when_already_held():
+    with db.workflow_lock(timeout_seconds=0):
+        with pytest.raises(RuntimeError, match="already running"):
+            with db.workflow_lock(timeout_seconds=0):
+                pass
+
+
 def test_phase_two_staging_tables_exist_for_indices_and_symbol_metadata():
     db.reset_rehearsal_tables()
 

@@ -9,8 +9,9 @@ Safety boundary:
 - Do not store API keys, tokens, account numbers, passwords, or secrets.
 - Do not call live order, paper order, balance mutation, or account-action
   endpoints.
-- Korea Investment Securities is the only future API/market-data source for the
-  staged real-data workflow.
+- Korea Investment Securities remains the future broker/API smoke target.
+- The two-year historical 1-minute raw acquisition exception uses Daishin
+  Securities CYBOS and is outside this API smoke command.
 
 ## Offline Plan
 

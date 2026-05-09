@@ -61,6 +61,6 @@ anchors, secret-literal absence, Docker Compose Postgres readiness, and pytest.
 - No paper trading or live trading.
 - No order placement.
 - No credentials or account identifiers in the repository.
-- Real historical-data validation starts after this dummy-data target and uses
-  Korea Investment Securities only unless the owner explicitly changes that
-  decision.
+- Real historical-data validation starts after this dummy-data target. The
+  owner-approved two-year raw acquisition path is Daishin Securities CYBOS; the
+  promoted/API/trading boundary remains separate and restricted.
