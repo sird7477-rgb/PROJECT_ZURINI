@@ -25,7 +25,14 @@ from zurini.data.large_dummy import (
     summarize_large_dummy_profile,
 )
 from zurini.market import Bar
-from zurini.phase2 import build_monthly_rehearsal_plan, read_path_list, write_monthly_rehearsal_plan
+from zurini.phase2 import (
+    build_monthly_rehearsal_plan,
+    build_phase2_batch_summary,
+    discover_report_paths,
+    read_path_list,
+    write_monthly_rehearsal_plan,
+    write_phase2_batch_summary,
+)
 from zurini.reports.files import write_backtest_outputs
 
 DEFAULT_CONFIG = Path("config/phase1-backtest.toml")
@@ -59,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_scan_csv_command(args)
     if args.command == "phase2-monthly-plan":
         return run_phase2_monthly_plan_command(args)
+    if args.command == "phase2-summarize-runs":
+        return run_phase2_summarize_runs_command(args)
     if args.command == "api-smoke":
         return run_api_smoke_command(args)
     if args.command == "rehearse-large-dummy":
@@ -118,6 +127,16 @@ def _build_parser() -> argparse.ArgumentParser:
     phase2_plan.add_argument("--current-yyyymm", help="override current month boundary for tests/replays")
     phase2_plan.add_argument("--limit-symbols", type=int, default=100)
     phase2_plan.add_argument("--month", action="append", help="restrict to specific completed YYYYMM periods")
+
+    phase2_summary = subparsers.add_parser(
+        "phase2-summarize-runs",
+        help="summarize one or more phase-2 backtest report.json files",
+    )
+    phase2_summary.add_argument("--report", type=Path, action="append", default=[])
+    phase2_summary.add_argument("--report-list", type=Path, action="append", default=[])
+    phase2_summary.add_argument("--root", type=Path, action="append", default=[], help="report.json file or directory tree")
+    phase2_summary.add_argument("--output-json", type=Path, default=Path("reports/phase2/batch-summary.json"))
+    phase2_summary.add_argument("--output-md", type=Path, default=Path("reports/phase2/batch-summary.md"))
 
     api_smoke = subparsers.add_parser("api-smoke", help="write a read-only API smoke-test plan")
     api_smoke.add_argument("--output", type=Path, default=Path("reports/api-smoke-plan.json"))
@@ -340,6 +359,26 @@ def run_phase2_monthly_plan_command(args: argparse.Namespace) -> int:
     print(f"path_list={outputs['path_list']}")
     print("recommended_command=" + " ".join(plan.recommended_command))
     return 0 if plan.selected_months and plan.selected_symbols else 1
+
+
+def run_phase2_summarize_runs_command(args: argparse.Namespace) -> int:
+    report_paths = list(args.report)
+    for report_list in args.report_list:
+        report_paths.extend(read_path_list(report_list))
+    paths = discover_report_paths(report_paths, args.root)
+    summary = build_phase2_batch_summary(paths)
+    write_phase2_batch_summary(summary, output_json=args.output_json, output_markdown=args.output_md)
+
+    print(f"report_count={summary.report_count}")
+    print(f"total_inserted_rows={summary.total_inserted_rows}")
+    print(f"total_trade_count={summary.total_trade_count}")
+    print(f"total_net_pnl={summary.total_net_pnl}")
+    print(f"total_valid_trades={summary.total_valid_trades}")
+    print(f"total_invalid_trades={summary.total_invalid_trades}")
+    print(f"continuity_status={summary.continuity_status}")
+    print(f"summary_json={args.output_json}")
+    print(f"summary_md={args.output_md}")
+    return 0
 
 
 def run_api_smoke_command(args: argparse.Namespace) -> int:

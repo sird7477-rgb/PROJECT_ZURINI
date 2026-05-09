@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,6 +40,46 @@ class MonthlyRehearsalPlan:
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["months"] = [month.as_dict() for month in self.months]
+        return payload
+
+
+@dataclass(frozen=True)
+class BacktestRunSummary:
+    report_path: str
+    symbol_count: int
+    inserted_rows: int
+    trade_count: int
+    net_pnl: str
+    valid_trades: int
+    invalid_trades: int
+    valid_net_pnl: str
+    invalid_net_pnl: str
+    continuity_status: str
+    exit_reasons: dict[str, int]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Phase2BatchSummary:
+    purpose: str
+    interpretation_boundary: str
+    report_count: int
+    total_inserted_rows: int
+    total_trade_count: int
+    total_net_pnl: str
+    total_valid_trades: int
+    total_invalid_trades: int
+    total_valid_net_pnl: str
+    total_invalid_net_pnl: str
+    continuity_status: str
+    exit_reasons: dict[str, int]
+    reports: list[BacktestRunSummary]
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["reports"] = [report.as_dict() for report in self.reports]
         return payload
 
 
@@ -129,6 +170,151 @@ def read_path_list(path: Path | str) -> list[Path]:
         if stripped and not stripped.startswith("#"):
             items.append(Path(stripped))
     return items
+
+
+def discover_report_paths(paths: list[Path], roots: list[Path]) -> list[Path]:
+    discovered = list(paths)
+    for root in roots:
+        if not root.exists():
+            raise FileNotFoundError(f"report root does not exist: {root}")
+        if root.is_dir():
+            discovered.extend(sorted(path for path in root.rglob("report.json") if path.is_file()))
+        else:
+            discovered.append(root)
+    if not discovered:
+        raise ValueError("at least one --report or --root is required")
+    return list(dict.fromkeys(discovered))
+
+
+def build_phase2_batch_summary(report_paths: list[Path]) -> Phase2BatchSummary:
+    if not report_paths:
+        raise ValueError("at least one report path is required")
+    reports = [_summarize_report(path) for path in report_paths]
+    exit_reasons: dict[str, int] = {}
+    for report in reports:
+        for reason, count in report.exit_reasons.items():
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + count
+    total_invalid_trades = sum(report.invalid_trades for report in reports)
+    all_reports_passed = all(report.continuity_status == "passed" for report in reports)
+    continuity_status = "passed" if total_invalid_trades == 0 and all_reports_passed else "review-required"
+    return Phase2BatchSummary(
+        purpose="phase-2 backtest batch operational summary",
+        interpretation_boundary=(
+            "This summary checks pipeline and data continuity evidence; it is not a strategy profitability verdict."
+        ),
+        report_count=len(reports),
+        total_inserted_rows=sum(report.inserted_rows for report in reports),
+        total_trade_count=sum(report.trade_count for report in reports),
+        total_net_pnl=str(sum((_decimal(report.net_pnl) for report in reports), Decimal("0"))),
+        total_valid_trades=sum(report.valid_trades for report in reports),
+        total_invalid_trades=total_invalid_trades,
+        total_valid_net_pnl=str(sum((_decimal(report.valid_net_pnl) for report in reports), Decimal("0"))),
+        total_invalid_net_pnl=str(sum((_decimal(report.invalid_net_pnl) for report in reports), Decimal("0"))),
+        continuity_status=continuity_status,
+        exit_reasons=exit_reasons,
+        reports=reports,
+    )
+
+
+def write_phase2_batch_summary(summary: Phase2BatchSummary, *, output_json: Path, output_markdown: Path) -> None:
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_markdown.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(summary.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output_markdown.write_text(_batch_summary_markdown(summary), encoding="utf-8")
+
+
+def _summarize_report(path: Path) -> BacktestRunSummary:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _require_report_fields(path, payload)
+    report = payload.get("report", {})
+    trades = payload.get("trades", [])
+    continuity = payload.get("trade_continuity", {})
+    continuity_summary = payload.get("trade_continuity_summary", {})
+    trade_count = int(report.get("trade_count", len(trades)))
+    return BacktestRunSummary(
+        report_path=str(path),
+        symbol_count=len(payload.get("symbols", [])),
+        inserted_rows=int(payload.get("inserted_rows", 0)),
+        trade_count=trade_count,
+        net_pnl=str(report.get("net_pnl", "0")),
+        valid_trades=int(continuity_summary.get("valid_trades", trade_count)),
+        invalid_trades=int(continuity_summary.get("invalid_trades", 0)),
+        valid_net_pnl=str(continuity_summary.get("valid_net_pnl", report.get("net_pnl", "0"))),
+        invalid_net_pnl=str(continuity_summary.get("invalid_net_pnl", "0")),
+        continuity_status=str(continuity.get("status", "unknown")),
+        exit_reasons=_exit_reasons(trades),
+    )
+
+
+def _require_report_fields(path: Path, payload: dict[str, Any]) -> None:
+    missing = []
+    if "symbols" not in payload:
+        missing.append("symbols")
+    if "inserted_rows" not in payload:
+        missing.append("inserted_rows")
+    if "trades" not in payload:
+        missing.append("trades")
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        missing.append("report")
+    else:
+        for key in ["trade_count", "net_pnl"]:
+            if key not in report:
+                missing.append(f"report.{key}")
+    if missing:
+        raise ValueError(f"report is missing required fields: {path}: {','.join(missing)}")
+
+
+def _exit_reasons(trades: list[dict[str, Any]]) -> dict[str, int]:
+    reasons: dict[str, int] = {}
+    for trade in trades:
+        reason = str(trade.get("reason", "unknown"))
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return reasons
+
+
+def _batch_summary_markdown(summary: Phase2BatchSummary) -> str:
+    lines = [
+        "# Phase 2 Batch Summary",
+        "",
+        f"- report_count: {summary.report_count}",
+        f"- total_inserted_rows: {summary.total_inserted_rows}",
+        f"- total_trade_count: {summary.total_trade_count}",
+        f"- total_net_pnl: {summary.total_net_pnl}",
+        f"- total_valid_trades: {summary.total_valid_trades}",
+        f"- total_invalid_trades: {summary.total_invalid_trades}",
+        f"- total_valid_net_pnl: {summary.total_valid_net_pnl}",
+        f"- total_invalid_net_pnl: {summary.total_invalid_net_pnl}",
+        f"- continuity_status: {summary.continuity_status}",
+        "",
+        "## Exit Reasons",
+        "",
+    ]
+    if summary.exit_reasons:
+        lines.extend(f"- {reason}: {count}" for reason, count in sorted(summary.exit_reasons.items()))
+    else:
+        lines.append("- none: 0")
+    lines.extend(["", "## Reports", "", "| report | rows | trades | valid | invalid | net_pnl |", "|---|---:|---:|---:|---:|---:|"])
+    for report in summary.reports:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    report.report_path,
+                    str(report.inserted_rows),
+                    str(report.trade_count),
+                    str(report.valid_trades),
+                    str(report.invalid_trades),
+                    report.net_pnl,
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _decimal(value: str) -> Decimal:
+    return Decimal(str(value))
 
 
 def _discover_months(root: Path, *, current_yyyymm: str) -> list[MonthlyDataset]:
