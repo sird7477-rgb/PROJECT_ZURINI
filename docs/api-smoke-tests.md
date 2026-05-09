@@ -13,6 +13,14 @@ Safety boundary:
 - The two-year historical 1-minute raw acquisition exception uses Daishin
   Securities CYBOS and is outside this API smoke command.
 
+## Scope Approval
+
+On 2026-05-09, after a manual read-only API smoke attempt, the owner approved
+preparing the token/update path in advance. This scope is limited to API smoke
+clients that prove connectivity and response contracts. It does not authorize
+trading clients, account/balance reads, order placement, paper trading loops,
+live trading, or token persistence.
+
 ## Offline Plan
 
 The current command writes an offline plan from environment-variable presence
@@ -36,13 +44,25 @@ When the owner explicitly wants real connectivity checks, use:
   --output reports/api-smoke-plan.json
 ```
 
-At this stage `--allow-network` only marks which probes are eligible. Actual
-HTTP clients should be added later behind read-only tests in this order:
+`--allow-network` without `--run-network` only marks which probes are eligible.
+To run the read-only smoke clients, use:
 
-1. Telegram message send to the configured chat.
+```bash
+.venv/bin/python -m zurini.cli api-smoke \
+  --allow-network \
+  --run-network \
+  --output reports/api-smoke-network.json
+```
+
+The network mode runs only these probes:
+
+1. Telegram `getMe` bot-token check.
 2. Gemini minimal request.
 3. Korea Investment Securities paper token/auth check.
-4. Korea Investment Securities market-data quote/minute-bar contract check.
+4. Korea Investment Securities market-data quote contract check.
+
+KIS paper access tokens are held in memory for the current smoke run only. They
+must not be printed, written to reports, or persisted as files.
 
 Korea Investment Securities live account endpoints stay disabled until a later
 owner-approved live-trading phase.

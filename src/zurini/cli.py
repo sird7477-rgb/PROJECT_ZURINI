@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from zurini.backtest.engine import BacktestConfig, run_backtest
-from zurini.api_smoke import build_api_smoke_plan
+from zurini.api_smoke import build_api_smoke_plan, run_api_smoke_network
 from zurini.data import db
 from zurini.data.acceptance import CsvAcceptanceCriteria, assess_csv_scan
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
@@ -109,6 +109,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mark probes network-capable when required environment variables exist; no orders are allowed",
     )
+    api_smoke.add_argument(
+        "--run-network",
+        action="store_true",
+        help="run read-only network smoke probes; no orders, balances, accounts, or secret output are allowed",
+    )
+    api_smoke.add_argument("--symbol", default="005930", help="KIS paper market-data symbol for read-only smoke")
 
     rehearse = subparsers.add_parser(
         "rehearse-large-dummy",
@@ -290,13 +296,21 @@ def run_scan_csv_command(args: argparse.Namespace) -> int:
 
 
 def run_api_smoke_command(args: argparse.Namespace) -> int:
-    payload = build_api_smoke_plan(allow_network=args.allow_network)
+    if args.run_network and not args.allow_network:
+        raise ValueError("--run-network requires --allow-network")
+    payload = (
+        run_api_smoke_network(symbol=args.symbol)
+        if args.run_network
+        else build_api_smoke_plan(allow_network=args.allow_network)
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     print(f"status={payload['status']}")
     print(f"mode={payload['mode']}")
     print(f"report={args.output}")
+    if args.run_network:
+        return 0 if payload["status"] == "passed" else 1
     return 0 if payload["status"] == "ready" or not args.allow_network else 1
 
 
