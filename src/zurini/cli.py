@@ -11,6 +11,7 @@ from pathlib import Path
 from zurini.backtest.engine import BacktestConfig, run_backtest
 from zurini.data import db
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
+from zurini.data.csv_quality import discover_daishin_csv_paths, scan_daishin_csv_tree
 from zurini.data.dummy import generate_dummy_bars
 from zurini.market import Bar
 from zurini.reports.files import write_backtest_outputs
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_load_sample_command(args)
     if args.command == "backtest-csv":
         return run_backtest_csv_command(args)
+    if args.command == "scan-csv":
+        return run_scan_csv_command(args)
     parser.print_help()
     return 2
 
@@ -64,11 +67,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     backtest_csv = subparsers.add_parser("backtest-csv", help="run a backtest from Daishin/CYBOS minute CSV files")
     backtest_csv.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    backtest_csv.add_argument("--path", type=Path, action="append", required=True)
+    backtest_csv.add_argument("--path", type=Path, action="append", default=[])
+    backtest_csv.add_argument("--root", type=Path, action="append", default=[], help="CSV file or directory tree")
     backtest_csv.add_argument("--symbol", action="append", help="symbol override matching each --path; defaults to file stems")
     backtest_csv.add_argument("--source", default="sample")
+    backtest_csv.add_argument("--limit-files", type=int, help="limit discovered CSV files for smoke runs")
     backtest_csv.add_argument("--output-dir", type=Path, default=Path("reports/sample-backtest"))
     backtest_csv.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
+
+    scan_csv = subparsers.add_parser("scan-csv", help="scan Daishin/CYBOS CSV files without loading Postgres")
+    scan_csv.add_argument("--root", type=Path, required=True, help="CSV file or directory tree")
+    scan_csv.add_argument("--source", default="sample")
+    scan_csv.add_argument("--output", type=Path, default=Path("reports/csv-scan.json"))
     return parser
 
 
@@ -129,10 +139,16 @@ def run_load_sample_command(args: argparse.Namespace) -> int:
 
 def run_backtest_csv_command(args: argparse.Namespace) -> int:
     config = load_config(args.config, output_dir=args.output_dir)
-    symbols = _csv_symbols(args.path, args.symbol)
+    if args.root and args.symbol:
+        raise ValueError("--symbol overrides are only supported with explicit --path arguments")
+    paths = _csv_paths(args.path, args.root)
+    if args.limit_files is not None:
+        paths = paths[: args.limit_files]
+    symbols = _csv_symbols(paths, args.symbol)
+    report_symbols = _unique_preserve_order(symbols)
     bars: list[Bar] = []
     quality_reports = []
-    for path, symbol in zip(args.path, symbols, strict=True):
+    for path, symbol in zip(paths, symbols, strict=True):
         loaded = load_daishin_minute_csv(path, symbol=symbol, source=args.source)
         bars.extend(loaded)
         quality_reports.append(build_csv_quality_report(loaded, source_path=path, symbol=symbol, source=args.source))
@@ -144,7 +160,7 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
     inserted = db.insert_bars(bars)
 
     loaded_from_db: list[Bar] = []
-    for symbol in symbols:
+    for symbol in report_symbols:
         loaded_from_db.extend(db.fetch_bars(symbol))
 
     report, trades = run_backtest(loaded_from_db, config=config.backtest)
@@ -152,7 +168,7 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
         report=report,
         trades=trades,
         output_dir=args.output_dir,
-        symbols=symbols,
+        symbols=report_symbols,
         inserted_rows=inserted,
         title="PROJECT_ZURINI phase-1 CSV sample backtest",
     )
@@ -169,6 +185,24 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
     print(f"report={outputs['json']}")
     print(f"quality_report={quality_path}")
     return 0
+
+
+def run_scan_csv_command(args: argparse.Namespace) -> int:
+    summary = scan_daishin_csv_tree(args.root, source=args.source)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(summary.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    print(f"root={summary.root}")
+    print(f"file_count={summary.file_count}")
+    print(f"ok_count={summary.ok_count}")
+    print(f"error_count={summary.error_count}")
+    print(f"success_rate={summary.success_rate:.4f}")
+    print(f"symbol_count={summary.symbol_count}")
+    print(f"period_count={summary.period_count}")
+    print(f"row_count={summary.row_count}")
+    print(f"gap_count={summary.gap_count}")
+    print(f"report={args.output}")
+    return 1 if summary.error_count else 0
 
 
 def load_config(path: Path, *, output_dir: Path | None = None) -> Phase1Config:
@@ -217,12 +251,25 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
 
+def _csv_paths(paths: list[Path], roots: list[Path]) -> list[Path]:
+    resolved = list(paths)
+    for root in roots:
+        resolved.extend(discover_daishin_csv_paths(root))
+    if not resolved:
+        raise ValueError("at least one --path or --root is required")
+    return list(dict.fromkeys(resolved))
+
+
 def _csv_symbols(paths: list[Path], symbols: list[str] | None) -> list[str]:
     if symbols is None:
         return [path.stem for path in paths]
     if len(symbols) != len(paths):
         raise ValueError("--symbol count must match --path count")
     return symbols
+
+
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
 
 
 if __name__ == "__main__":

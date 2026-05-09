@@ -40,3 +40,14 @@ def test_schema_rejects_duplicate_symbol_timestamp():
 
     with pytest.raises(Exception):
         db.insert_bars([bars[0]])
+
+
+def test_phase_two_staging_tables_exist_for_indices_and_symbol_metadata():
+    db.reset_market_bars()
+
+    with db._connect() as conn:
+        index_count = conn.execute("SELECT count(*) FROM index_bars").fetchone()[0]
+        metadata_count = conn.execute("SELECT count(*) FROM symbol_metadata").fetchone()[0]
+
+    assert index_count == 0
+    assert metadata_count == 0

@@ -62,6 +62,18 @@ raw 수집 파일은 곧바로 백테스트 정답 데이터로 보지 않는다
 승격하기 전에 결측 분, 중복 `symbol + timestamp`, timezone 변환, OHLCV
 무결성, 지수/종목 시간 정렬을 별도 품질검사로 통과해야 한다.
 
+수집 후 첫 검사는 DB에 넣지 않는 CSV 스캔으로 한다.
+
+```bash
+.venv/bin/python -m zurini.cli scan-csv --root data/raw/daishin/minute-bars --output reports/csv-scan.json
+```
+
+작은 smoke 검증은 일부 파일만 기존 백테스트 경로에 통과시킨다.
+
+```bash
+.venv/bin/python -m zurini.cli backtest-csv --root data/raw/daishin/minute-bars --limit-files 10 --output-dir reports/csv-smoke
+```
+
 ## 작업 루프
 
 1. 요청 범위를 phase-1 목표 안에서 고정한다.
