@@ -6,9 +6,10 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from zurini.data.calendar import TradingCalendar, load_trading_calendar
 from zurini.market import Bar, Trade
 
-DEFAULT_SESSION_START = time(9, 0)
+DEFAULT_SESSION_START = time(9, 1)
 DEFAULT_SESSION_END = time(15, 30)
 DEFAULT_SESSION_TIMEZONE = ZoneInfo("Asia/Seoul")
 
@@ -69,10 +70,13 @@ def assess_trade_continuity(
     session_start: time = DEFAULT_SESSION_START,
     session_end: time = DEFAULT_SESSION_END,
     session_timezone: ZoneInfo = DEFAULT_SESSION_TIMEZONE,
+    calendar: TradingCalendar | None = None,
 ) -> TradeContinuitySummary:
     if audit_mode not in {"dense-window", "exact-bar"}:
         raise ValueError("audit_mode must be 'dense-window' or 'exact-bar'")
     timestamps_by_symbol = _timestamps_by_symbol(bars)
+    calendar = calendar or load_trading_calendar()
+    effective_session_start, effective_session_end = _effective_session_window(session_start, session_end, calendar)
     checks: list[TradeContinuityCheck] = []
     for trade in trades:
         checks.append(
@@ -83,9 +87,10 @@ def assess_trade_continuity(
                 timestamps=timestamps_by_symbol.get(trade.symbol, set()),
                 window_minutes=window_minutes,
                 audit_mode=audit_mode,
-                session_start=session_start,
-                session_end=session_end,
+                session_start=effective_session_start,
+                session_end=effective_session_end,
                 session_timezone=session_timezone,
+                calendar=calendar,
             )
         )
         checks.append(
@@ -96,9 +101,10 @@ def assess_trade_continuity(
                 timestamps=timestamps_by_symbol.get(trade.symbol, set()),
                 window_minutes=window_minutes,
                 audit_mode=audit_mode,
-                session_start=session_start,
-                session_end=session_end,
+                session_start=effective_session_start,
+                session_end=effective_session_end,
                 session_timezone=session_timezone,
+                calendar=calendar,
             )
         )
     failed = [check for check in checks if check.status != "passed"]
@@ -106,8 +112,8 @@ def assess_trade_continuity(
     return TradeContinuitySummary(
         status="passed" if not failed else "failed",
         window_minutes=window_minutes,
-        session_start=session_start.isoformat(timespec="minutes"),
-        session_end=session_end.isoformat(timespec="minutes"),
+        session_start=effective_session_start.isoformat(timespec="minutes"),
+        session_end=effective_session_end.isoformat(timespec="minutes"),
         checked_points=len(checks),
         failed_points=len(failed),
         missing_minutes=missing_minutes,
@@ -160,6 +166,16 @@ def _timestamps_by_symbol(bars: list[Bar]) -> dict[str, set[datetime]]:
     return result
 
 
+def _effective_session_window(
+    session_start: time,
+    session_end: time,
+    calendar: TradingCalendar,
+) -> tuple[time, time]:
+    if session_start == DEFAULT_SESSION_START and session_end == DEFAULT_SESSION_END:
+        return calendar.default_start, calendar.default_end
+    return session_start, session_end
+
+
 def _check_trade_time(
     *,
     symbol: str,
@@ -171,9 +187,10 @@ def _check_trade_time(
     session_start: time,
     session_end: time,
     session_timezone: ZoneInfo,
+    calendar: TradingCalendar,
 ) -> TradeContinuityCheck:
     previous_distance, next_distance = _nearest_observed_distances(trade_time, timestamps)
-    if not _in_session(trade_time, session_start, session_end, session_timezone):
+    if not _in_session(trade_time, session_start, session_end, session_timezone, calendar):
         return TradeContinuityCheck(
             symbol=symbol,
             trade_time=trade_time.isoformat(),
@@ -206,7 +223,7 @@ def _check_trade_time(
             continue
         candidate = trade_time + timedelta(minutes=offset)
         if _same_session_date(candidate, trade_time, session_timezone) and _in_session(
-            candidate, session_start, session_end, session_timezone
+            candidate, session_start, session_end, session_timezone, calendar
         ):
             expected.append(candidate)
     missing = sum(1 for timestamp in expected if timestamp not in timestamps)
@@ -229,8 +246,12 @@ def _in_session(
     session_start: time,
     session_end: time,
     session_timezone: ZoneInfo,
+    calendar: TradingCalendar,
 ) -> bool:
-    return session_start <= _session_local_time(timestamp, session_timezone) <= session_end
+    local = timestamp.astimezone(session_timezone) if timestamp.tzinfo else timestamp
+    special = calendar.special_sessions.get(local.date())
+    day_start, day_end = (special[0], special[1]) if special else (session_start, session_end)
+    return day_start <= local.time() <= day_end
 
 
 def _same_session_date(left: datetime, right: datetime, session_timezone: ZoneInfo) -> bool:

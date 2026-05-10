@@ -58,6 +58,112 @@ def test_backtest_hand_checkable_profit_target_fixture():
     assert report.net_pnl.quantize(Decimal("0.01")) == Decimal("300.00")
 
 
+def test_backtest_nonzero_costs_reduce_net_pnl_exactly():
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    bars = [
+        Bar("FIXTURE", start, money(100), money(100), money(100), money(100), 10, money(1000)),
+        Bar("FIXTURE", start + timedelta(minutes=1), money(104), money(104), money(104), money(104), 10, money(1040)),
+    ]
+
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    _report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(
+            start_equity=Decimal("1000"),
+            fee_rate=Decimal("0.001"),
+            slippage_rate=Decimal("0.01"),
+            profit_target=Decimal("0.01"),
+        ),
+    )
+
+    trade = trades[0]
+    expected_fees = (trade.entry_price + trade.exit_price) * trade.quantity * Decimal("0.001")
+    assert trade.entry_price == Decimal("101.00")
+    assert trade.exit_price == Decimal("102.96")
+    assert trade.net_pnl == trade.gross_pnl - expected_fees
+
+
+def test_conservative_intrabar_policy_marks_ambiguous_stop_first():
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    bars = [
+        Bar("FIXTURE", start, money(100), money(100), money(100), money(100), 10, money(1000)),
+        Bar("FIXTURE", start + timedelta(minutes=1), money(100), money(106), money(94), money(101), 10, money(1010)),
+    ]
+
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    _report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(
+            start_equity=Decimal("1000"),
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            profit_target=Decimal("0.03"),
+            hard_stop=Decimal("-0.03"),
+            intrabar_policy="conservative",
+        ),
+    )
+
+    assert trades[0].reason == "hard-stop"
+    assert trades[0].exit_price == Decimal("97.00")
+    assert trades[0].ambiguous_intrabar is True
+    assert trades[0].execution_note == "target-and-stop-touched-stop-first"
+
+
+def test_conservative_intrabar_policy_does_not_exit_on_entry_bar_range():
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    bars = [
+        Bar("FIXTURE", start, money(100), money(110), money(90), money(100), 10, money(1000)),
+        Bar("FIXTURE", start + timedelta(minutes=1), money(100), money(101), money(99), money(100), 10, money(1000)),
+    ]
+
+    class BuyOnceStrategy:
+        def __init__(self):
+            self.seen = False
+
+        def on_bar(self, bar, risk=None):
+            if self.seen:
+                return SignalIntent("hold")
+            self.seen = True
+            return SignalIntent("buy", weight=Decimal("1.0"))
+
+    _report, trades = run_backtest(
+        bars,
+        strategy_factory=BuyOnceStrategy,
+        config=BacktestConfig(
+            start_equity=Decimal("1000"),
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            profit_target=Decimal("0.03"),
+            hard_stop=Decimal("-0.03"),
+            intrabar_policy="conservative",
+        ),
+    )
+
+    assert trades[0].reason == "end-of-test"
+    assert trades[0].ambiguous_intrabar is False
+    assert trades[0].execution_note == ""
+
+
 def test_beta_throttle_blocks_entries_at_all_stop():
     report, trades = run_backtest(
         generate_dummy_bars(seed=7477),

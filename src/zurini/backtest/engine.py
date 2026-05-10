@@ -28,6 +28,8 @@ class BacktestConfig:
     hard_stop: Decimal = Decimal("-0.03")
     day_end_exit: bool = True
     max_holding_minutes: int | None = None
+    intrabar_policy: str = "close-only"
+    ambiguous_intrabar_policy: str = "stop-first"
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,8 @@ def run_backtest(
             hard_stop=config.hard_stop,
             day_end_exit=config.day_end_exit,
             max_holding_minutes=config.max_holding_minutes,
+            intrabar_policy=config.intrabar_policy,
+            ambiguous_intrabar_policy=config.ambiguous_intrabar_policy,
         )
         symbol_strategy = _new_strategy(
             strategy=strategy,
@@ -222,16 +226,20 @@ def _run_single_symbol(
 
         assert entry_price is not None
         assert entry_time is not None
+        exit_reason, exit_reference_price, ambiguous_intrabar, execution_note = _exit_decision(
+            bar=bar,
+            entry_price=entry_price,
+            config=config,
+        )
         pnl_ratio = (bar.close - entry_price) / entry_price
         final_bar = index == len(ordered) - 1
-        exit_reason = ""
-        if pnl_ratio >= config.profit_target:
+        if not exit_reason and pnl_ratio >= config.profit_target:
             exit_reason = "profit-target"
-        elif pnl_ratio <= config.hard_stop:
+        elif not exit_reason and pnl_ratio <= config.hard_stop:
             exit_reason = "hard-stop"
-        elif config.max_holding_minutes is not None and _holding_minutes(entry_time, bar.timestamp) >= config.max_holding_minutes:
+        elif not exit_reason and config.max_holding_minutes is not None and _holding_minutes(entry_time, bar.timestamp) >= config.max_holding_minutes:
             exit_reason = "max-holding"
-        elif final_bar:
+        elif not exit_reason and final_bar:
             exit_reason = "end-of-test"
 
         mark_equity = cash + position_qty * bar.close
@@ -248,6 +256,9 @@ def _run_single_symbol(
                 position_qty=position_qty,
                 config=config,
                 reason=exit_reason,
+                reference_price=exit_reference_price,
+                ambiguous_intrabar=ambiguous_intrabar,
+                execution_note=execution_note,
             )
             cash += trade.exit_price * position_qty - (trade.exit_price * position_qty * config.fee_rate)
             trades.append(trade)
@@ -277,8 +288,11 @@ def _close_position(
     position_qty: Decimal,
     config: BacktestConfig,
     reason: str,
+    reference_price: Decimal | None = None,
+    ambiguous_intrabar: bool = False,
+    execution_note: str = "",
 ) -> Trade:
-    exit_price = bar.close * (Decimal("1") - config.slippage_rate)
+    exit_price = (reference_price or bar.close) * (Decimal("1") - config.slippage_rate)
     gross_pnl = (exit_price - entry_price) * position_qty
     fees = (entry_price + exit_price) * position_qty * config.fee_rate
     net_pnl = gross_pnl - fees
@@ -292,7 +306,35 @@ def _close_position(
         gross_pnl=gross_pnl,
         net_pnl=net_pnl,
         reason=reason,
+        ambiguous_intrabar=ambiguous_intrabar,
+        execution_note=execution_note,
     )
+
+
+def _exit_decision(
+    *,
+    bar: Bar,
+    entry_price: Decimal,
+    config: BacktestConfig,
+) -> tuple[str, Decimal | None, bool, str]:
+    if config.intrabar_policy == "close-only":
+        return "", None, False, ""
+    if config.intrabar_policy != "conservative":
+        raise ValueError("intrabar_policy must be 'close-only' or 'conservative'")
+    if config.ambiguous_intrabar_policy != "stop-first":
+        raise ValueError("ambiguous_intrabar_policy must be 'stop-first'")
+
+    target_price = entry_price * (Decimal("1") + config.profit_target)
+    stop_price = entry_price * (Decimal("1") + config.hard_stop)
+    target_touched = bar.high >= target_price
+    stop_touched = bar.low <= stop_price
+    if target_touched and stop_touched:
+        return "hard-stop", stop_price, True, "target-and-stop-touched-stop-first"
+    if stop_touched:
+        return "hard-stop", stop_price, False, "intrabar-stop-touched"
+    if target_touched:
+        return "profit-target", target_price, False, "intrabar-target-touched"
+    return "", None, False, ""
 
 
 def _session_date(timestamp: datetime):

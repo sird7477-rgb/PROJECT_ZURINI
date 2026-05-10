@@ -275,10 +275,47 @@ def test_backtest_csv_cli_runs_sample_through_existing_engine(tmp_path):
     assert report["inserted_rows"] == 4208
     assert report["trade_continuity"]["status"] in {"passed", "failed"}
     assert report["trade_continuity"]["window_minutes"] == 5
+    assert report["phase2_parameters"]["profit_target"] == "0.03"
     assert "trade_count" in report["report"]
     assert quality[0]["symbol"] == "A000020"
     assert quality[0]["row_count"] == 4208
     assert "PROJECT_ZURINI phase-1 CSV sample backtest" in summary
+
+
+@pytest.mark.integration
+def test_backtest_csv_cli_accepts_phase2_parameter_overrides(tmp_path):
+    output_dir = tmp_path / "sample-backtest"
+
+    exit_code = main(
+        [
+            "backtest-csv",
+            "--path",
+            "sample/A000020.csv",
+            "--profit-target",
+            "0.02",
+            "--hard-stop",
+            "-0.02",
+            "--pullback-band",
+            "0.004",
+            "--min-bid-ask-ratio",
+            "1.5",
+            "--intrabar-policy",
+            "conservative",
+            "--ambiguous-intrabar-policy",
+            "stop-first",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["phase2_parameters"]["profit_target"] == "0.02"
+    assert report["phase2_parameters"]["hard_stop"] == "-0.02"
+    assert report["phase2_parameters"]["pullback_band"] == "0.004"
+    assert report["phase2_parameters"]["min_bid_ask_ratio"] == "1.5"
+    assert report["phase2_parameters"]["intrabar_policy"] == "conservative"
+    assert report["phase2_parameters"]["ambiguous_intrabar_policy"] == "stop-first"
 
 
 @pytest.mark.integration

@@ -62,6 +62,8 @@ def _write_trades_csv(path: Path, trades: list[Trade]) -> None:
         "gross_pnl",
         "net_pnl",
         "reason",
+        "ambiguous_intrabar",
+        "execution_note",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

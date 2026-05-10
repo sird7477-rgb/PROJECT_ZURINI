@@ -20,6 +20,7 @@ def _write_report(
     valid_trades: int | None = None,
     invalid_trades: int = 0,
     invalid_net_pnl: str | None = None,
+    ambiguous_intrabar: bool = False,
     reason: str = "profit-target",
     continuity_status: str | None = None,
 ) -> None:
@@ -36,6 +37,7 @@ def _write_report(
             "gross_pnl": "1",
             "net_pnl": "1",
             "reason": reason,
+            "ambiguous_intrabar": ambiguous_intrabar,
         }
         for index in range(trade_count)
     ]
@@ -102,6 +104,7 @@ def test_phase2_summarize_runs_cli_writes_json_and_markdown(tmp_path):
     assert payload["continuity_status"] == "passed"
     assert payload["invalid_trade_ratio"] == "0"
     assert payload["invalid_net_pnl_ratio"] == "0"
+    assert payload["ambiguous_intrabar_ratio"] == "0"
     assert payload["optimization_gate_status"] == "passed"
     assert "Phase 2 Batch Summary" in markdown
 
@@ -243,6 +246,25 @@ def test_phase2_summarize_runs_flags_failed_continuity_status_even_without_inval
 
     assert summary.total_invalid_trades == 0
     assert summary.continuity_status == "review-required"
+
+
+def test_phase2_summarize_runs_blocks_ambiguous_intrabar_trades(tmp_path):
+    report = tmp_path / "report.json"
+    _write_report(
+        report,
+        symbols=["A000020"],
+        inserted_rows=100,
+        trade_count=2,
+        net_pnl="2",
+        ambiguous_intrabar=True,
+    )
+
+    summary = build_phase2_batch_summary([report])
+
+    assert summary.total_ambiguous_intrabar_trades == 2
+    assert summary.ambiguous_intrabar_ratio == "1"
+    assert summary.continuity_status == "review-required"
+    assert summary.optimization_gate_status == "blocked"
 
 
 def test_phase2_summarize_runs_cli_succeeds_when_summary_requires_review(tmp_path):

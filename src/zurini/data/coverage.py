@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 import sys
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from zurini.data.calendar import TradingCalendar, load_trading_calendar
 from zurini.data.csv_loader import build_csv_quality_report, load_daishin_minute_csv
 from zurini.data.csv_quality import discover_daishin_csv_paths
 from zurini.market import Bar
@@ -15,14 +16,6 @@ from zurini.market import Bar
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_GRID_START = time(9, 1)
 DEFAULT_GRID_END = time(15, 30)
-CALENDAR_VERSION = "observed-session-v1"
-# This profiler validates intra-day minute completeness for days with at least
-# one observed bar. A full missing trading day still needs a calendar day-set
-# gate before index coverage can be treated as final promotion evidence.
-SPECIAL_SESSIONS = {
-    "2025-11-13": (time(10, 1), time(16, 30)),
-    "2026-01-02": (time(10, 1), time(15, 30)),
-}
 
 
 @dataclass(frozen=True)
@@ -39,6 +32,15 @@ class CoverageResult:
     missing_edge_minutes: int
     out_of_session_count: int
     zero_volume_count: int
+    expected_trading_days: int
+    observed_trading_days: int
+    observed_trading_dates: list[str]
+    day_set_evaluated: bool
+    missing_trading_days: list[str]
+    unexpected_trading_days: list[str]
+    day_set_complete: bool
+    calendar_certified: bool
+    promotable_calendar: bool
     first_timestamp: str | None
     last_timestamp: str | None
     error: str = ""
@@ -52,6 +54,7 @@ class CoverageSummary:
     root: str
     class_mode: str
     calendar_version: str
+    calendar_certified: bool
     file_count: int
     ok_count: int
     error_count: int
@@ -65,6 +68,14 @@ class CoverageSummary:
     missing_edge_minutes: int
     out_of_session_count: int
     zero_volume_count: int
+    expected_trading_days: int
+    observed_trading_days: int
+    day_set_evaluated: bool
+    missing_trading_days: list[str]
+    unexpected_trading_days: list[str]
+    day_set_complete: bool
+    promotable_calendar: bool
+    period_day_sets: dict[str, dict[str, Any]]
     results: list[CoverageResult]
 
     def as_dict(self) -> dict[str, Any]:
@@ -84,10 +95,13 @@ def profile_csv_coverage(
     session_start: time = DEFAULT_GRID_START,
     session_end: time = DEFAULT_GRID_END,
     session_timezone: ZoneInfo = KST,
+    require_day_set: bool = False,
+    calendar: TradingCalendar | None = None,
 ) -> CoverageSummary:
     if class_mode not in {"index-grid", "stock-sparse"}:
         raise ValueError("class_mode must be 'index-grid' or 'stock-sparse'")
     root = Path(root)
+    calendar = calendar or load_trading_calendar()
     period_filter = set(periods or [])
     paths = _coverage_paths(root, period_filter=period_filter)
     if limit_files is not None:
@@ -102,6 +116,8 @@ def profile_csv_coverage(
                 session_start=session_start,
                 session_end=session_end,
                 session_timezone=session_timezone,
+                require_day_set=require_day_set,
+                calendar=calendar,
             )
         )
         if progress_every and (index == 1 or index % progress_every == 0 or index == len(paths)):
@@ -110,15 +126,35 @@ def profile_csv_coverage(
     accepted = [result for result in ok_results if result.status == "accepted"]
     expected = sum(result.expected_session_minutes for result in ok_results)
     observed = sum(result.observed_minutes for result in ok_results)
+    period_day_sets = _period_day_sets(results, require_day_set=require_day_set, calendar=calendar)
+    if class_mode == "stock-sparse" and require_day_set:
+        missing_days = sorted({day for item in period_day_sets.values() for day in item["missing_trading_days"]})
+        unexpected_days = sorted({day for item in period_day_sets.values() for day in item["unexpected_trading_days"]})
+        day_set_evaluated = bool(period_day_sets) and all(bool(item["day_set_evaluated"]) for item in period_day_sets.values())
+        expected_trading_days = sum(int(item["expected_trading_days"]) for item in period_day_sets.values())
+        observed_trading_days = sum(int(item["observed_trading_days"]) for item in period_day_sets.values())
+    else:
+        missing_days = sorted({day for result in ok_results for day in result.missing_trading_days})
+        unexpected_days = sorted({day for result in ok_results for day in result.unexpected_trading_days})
+        day_set_evaluated = bool(ok_results) and all(result.day_set_evaluated for result in ok_results)
+        expected_trading_days = sum(result.expected_trading_days for result in ok_results)
+        observed_trading_days = sum(result.observed_trading_days for result in ok_results)
+    day_set_complete = day_set_evaluated and not missing_days and not unexpected_days
+    acceptance_status = (
+        "accepted"
+        if results and len(accepted) == len(results) and (not require_day_set or day_set_complete)
+        else "review-required"
+    )
     return CoverageSummary(
         root=str(root),
         class_mode=class_mode,
-        calendar_version=CALENDAR_VERSION,
+        calendar_version=calendar.version,
+        calendar_certified=calendar.certified,
         file_count=len(results),
         ok_count=len(ok_results),
         error_count=len(results) - len(ok_results),
         accepted_count=len(accepted),
-        acceptance_status="accepted" if results and len(accepted) == len(results) else "review-required",
+        acceptance_status=acceptance_status,
         observed_minutes=observed,
         expected_session_minutes=expected,
         coverage_ratio=_ratio(observed, expected),
@@ -127,6 +163,14 @@ def profile_csv_coverage(
         missing_edge_minutes=sum(result.missing_edge_minutes for result in ok_results),
         out_of_session_count=sum(result.out_of_session_count for result in ok_results),
         zero_volume_count=sum(result.zero_volume_count for result in ok_results),
+        expected_trading_days=expected_trading_days,
+        observed_trading_days=observed_trading_days,
+        day_set_evaluated=day_set_evaluated,
+        missing_trading_days=missing_days,
+        unexpected_trading_days=unexpected_days,
+        day_set_complete=day_set_complete,
+        promotable_calendar=calendar.certified and day_set_complete,
+        period_day_sets=period_day_sets,
         results=results,
     )
 
@@ -139,17 +183,30 @@ def _profile_one(
     session_start: time,
     session_end: time,
     session_timezone: ZoneInfo,
+    require_day_set: bool,
+    calendar: TradingCalendar,
 ) -> CoverageResult:
     try:
         bars = load_daishin_minute_csv(path, source=source)
         quality = build_csv_quality_report(bars, source_path=path, source=source)
-        metrics = _coverage_metrics(bars, session_start=session_start, session_end=session_end, session_timezone=session_timezone)
+        metrics = _coverage_metrics(
+            bars,
+            source_path=path,
+            session_start=session_start,
+            session_end=session_end,
+            session_timezone=session_timezone,
+            require_day_set=require_day_set and class_mode == "index-grid",
+            calendar=calendar,
+        )
         strict_passed = (
             metrics["observed_minutes"] > 0
             and quality.duplicate_timestamp_count == 0
             and metrics["out_of_session_count"] == 0
             and metrics["missing_minutes_count"] == 0
             and metrics["missing_edge_minutes"] == 0
+            and metrics["day_set_evaluated"]
+            and metrics["day_set_complete"]
+            and not metrics["unexpected_trading_days"]
         )
         sparse_passed = (
             metrics["observed_minutes"] > 0
@@ -170,6 +227,15 @@ def _profile_one(
             missing_edge_minutes=metrics["missing_edge_minutes"],
             out_of_session_count=metrics["out_of_session_count"],
             zero_volume_count=quality.zero_volume_count,
+            expected_trading_days=metrics["expected_trading_days"],
+            observed_trading_days=metrics["observed_trading_days"],
+            observed_trading_dates=metrics["observed_trading_dates"],
+            day_set_evaluated=metrics["day_set_evaluated"],
+            missing_trading_days=metrics["missing_trading_days"],
+            unexpected_trading_days=metrics["unexpected_trading_days"],
+            day_set_complete=metrics["day_set_complete"],
+            calendar_certified=calendar.certified,
+            promotable_calendar=calendar.certified and metrics["day_set_complete"],
             first_timestamp=quality.first_timestamp,
             last_timestamp=quality.last_timestamp,
         )
@@ -187,6 +253,15 @@ def _profile_one(
             missing_edge_minutes=0,
             out_of_session_count=0,
             zero_volume_count=0,
+            expected_trading_days=0,
+            observed_trading_days=0,
+            observed_trading_dates=[],
+            day_set_evaluated=False,
+            missing_trading_days=[],
+            unexpected_trading_days=[],
+            day_set_complete=False,
+            calendar_certified=calendar.certified,
+            promotable_calendar=False,
             first_timestamp=None,
             last_timestamp=None,
             error=str(exc),
@@ -196,30 +271,43 @@ def _profile_one(
 def _coverage_metrics(
     bars: list[Bar],
     *,
+    source_path: Path,
     session_start: time,
     session_end: time,
     session_timezone: ZoneInfo,
-) -> dict[str, int]:
+    require_day_set: bool,
+    calendar: TradingCalendar,
+) -> dict[str, Any]:
     by_symbol_day: dict[tuple[str, object], set[datetime]] = defaultdict(set)
     out_of_session = 0
+    observed_days = set()
     for bar in bars:
         local = _localize(bar.timestamp, session_timezone)
-        day_start, day_end = _session_window(local, session_start=session_start, session_end=session_end)
+        day_start, day_end = _session_window(
+            local,
+            session_start=session_start,
+            session_end=session_end,
+            calendar=calendar,
+        )
         if not day_start <= local.time() <= day_end:
             out_of_session += 1
             continue
-        by_symbol_day[(bar.symbol, local.date())].add(local)
+        local_date = local.date()
+        observed_days.add(local_date)
+        by_symbol_day[(bar.symbol, local_date)].add(local)
 
     observed = 0
     expected = 0
     missing = 0
     longest_missing_run = 0
     edge_missing = 0
-    for timestamps in by_symbol_day.values():
-        expected_grid = _expected_grid(
-            min(timestamps),
+    for (_, value_date), timestamps in by_symbol_day.items():
+        expected_grid = _expected_grid_for_date(
+            value_date,
+            session_timezone=session_timezone,
             session_start=session_start,
             session_end=session_end,
+            calendar=calendar,
         )
         observed += len(timestamps)
         expected += len(expected_grid)
@@ -230,6 +318,26 @@ def _coverage_metrics(
             edge_missing += 1
         if expected_grid and expected_grid[-1] not in timestamps:
             edge_missing += 1
+    expected_days, day_set_evaluated = _expected_days_for_path(
+        source_path,
+        require_day_set=require_day_set,
+        calendar=calendar,
+    )
+    missing_days = sorted(day.isoformat() for day in expected_days if day not in observed_days)
+    unexpected_days = sorted(day.isoformat() for day in observed_days if expected_days and day not in expected_days)
+    for missing_day in (day for day in expected_days if day not in observed_days):
+        missing_grid = _expected_grid_for_date(
+            missing_day,
+            session_timezone=session_timezone,
+            session_start=session_start,
+            session_end=session_end,
+            calendar=calendar,
+        )
+        expected += len(missing_grid)
+        missing += len(missing_grid)
+        longest_missing_run = max(longest_missing_run, len(missing_grid))
+        if missing_grid:
+            edge_missing += 2
 
     return {
         "observed_minutes": observed,
@@ -238,11 +346,24 @@ def _coverage_metrics(
         "longest_missing_run": longest_missing_run,
         "missing_edge_minutes": edge_missing,
         "out_of_session_count": out_of_session,
+        "expected_trading_days": len(expected_days),
+        "observed_trading_days": len(observed_days),
+        "observed_trading_dates": sorted(day.isoformat() for day in observed_days),
+        "day_set_evaluated": day_set_evaluated,
+        "missing_trading_days": missing_days,
+        "unexpected_trading_days": unexpected_days,
+        "day_set_complete": day_set_evaluated and not missing_days and not unexpected_days,
     }
 
 
-def _expected_grid(anchor: datetime, *, session_start: time, session_end: time) -> list[datetime]:
-    day_start, day_end = _session_window(anchor, session_start=session_start, session_end=session_end)
+def _expected_grid(
+    anchor: datetime,
+    *,
+    session_start: time,
+    session_end: time,
+    calendar: TradingCalendar,
+) -> list[datetime]:
+    day_start, day_end = _session_window(anchor, session_start=session_start, session_end=session_end, calendar=calendar)
     start = anchor.replace(hour=day_start.hour, minute=day_start.minute, second=0, microsecond=0)
     end = anchor.replace(hour=day_end.hour, minute=day_end.minute, second=0, microsecond=0)
     result = []
@@ -253,8 +374,78 @@ def _expected_grid(anchor: datetime, *, session_start: time, session_end: time) 
     return result
 
 
-def _session_window(anchor: datetime, *, session_start: time, session_end: time) -> tuple[time, time]:
-    return SPECIAL_SESSIONS.get(anchor.date().isoformat(), (session_start, session_end))
+def _expected_grid_for_date(
+    value_date: date,
+    *,
+    session_timezone: ZoneInfo,
+    session_start: time,
+    session_end: time,
+    calendar: TradingCalendar,
+) -> list[datetime]:
+    anchor = datetime(
+        value_date.year,
+        value_date.month,
+        value_date.day,
+        session_start.hour,
+        session_start.minute,
+        tzinfo=session_timezone,
+    )
+    return _expected_grid(anchor, session_start=session_start, session_end=session_end, calendar=calendar)
+
+
+def _session_window(
+    anchor: datetime,
+    *,
+    session_start: time,
+    session_end: time,
+    calendar: TradingCalendar,
+) -> tuple[time, time]:
+    special = calendar.special_sessions.get(anchor.date()) if calendar else None
+    if special:
+        return special[0], special[1]
+    return session_start, session_end
+
+
+def _expected_days_for_path(path: Path, *, require_day_set: bool, calendar: TradingCalendar) -> tuple[set[date], bool]:
+    if not require_day_set:
+        return set(), False
+    period = _period_key(path)
+    if not period:
+        return set(), False
+    return set(calendar.trading_days_in_month(period)), True
+
+
+def _period_day_sets(
+    results: list[CoverageResult],
+    *,
+    require_day_set: bool,
+    calendar: TradingCalendar,
+) -> dict[str, dict[str, Any]]:
+    if not require_day_set:
+        return {}
+    observed_by_period: dict[str, set[date]] = defaultdict(set)
+    for result in results:
+        if result.error:
+            continue
+        period = _period_key(Path(result.path))
+        if not period:
+            continue
+        observed_by_period[period].update(date.fromisoformat(item) for item in result.observed_trading_dates)
+
+    period_sets: dict[str, dict[str, Any]] = {}
+    for period, observed_days in sorted(observed_by_period.items()):
+        expected_days = set(calendar.trading_days_in_month(period))
+        missing_days = sorted(day.isoformat() for day in expected_days if day not in observed_days)
+        unexpected_days = sorted(day.isoformat() for day in observed_days if day not in expected_days)
+        period_sets[period] = {
+            "day_set_evaluated": True,
+            "day_set_complete": not missing_days and not unexpected_days,
+            "expected_trading_days": len(expected_days),
+            "observed_trading_days": len(observed_days),
+            "missing_trading_days": missing_days,
+            "unexpected_trading_days": unexpected_days,
+        }
+    return period_sets
 
 
 def _localize(timestamp: datetime, session_timezone: ZoneInfo) -> datetime:

@@ -53,11 +53,15 @@ Required before use:
 Stop condition: if index bars have gaps, do not run market-regime filters for
 that interval. A strategy run using a broken index interval is analysis-only.
 
-Calendar limitation: the current implementation uses `observed-session-v1`,
-which records only observed shifted sessions found in the current local data
-(`2025-11-13` and `2026-01-02`). Add any additional exchange holiday or
-shifted-session day to the calendar before accepting index coverage for that
-interval.
+Calendar limitation: the current implementation uses
+`krx-korean-equity-v1`, a project-managed seed calendar under
+`data/trading-calendar/krx-korean-equity-v1.json`. It includes ordinary
+weekend exclusion, seeded 2025/2026 non-trading dates, and currently observed
+shifted sessions (`2025-11-13`, `2026-01-02`). Before promoting a longer
+strategy result, validate this calendar against an official KRX/KIS-derived
+day set for the full tested range. Coverage JSON separates
+`day_set_evaluated`, `day_set_complete`, and `calendar_certified`; seed-calendar
+acceptance is rehearsal evidence, not a field-test promotion claim.
 
 ### Class B: Stock Trade-Event Bars
 
@@ -181,26 +185,36 @@ fresh quote`, not confirmed zero-volume minutes.
    - require completed-month eligibility to be based on coverage, not only
      directory date
 
-## Required Next Implementation Work
+## Implemented Continuity Work
 
-- Add an exchange-session calendar so expected minute grids exclude weekends,
-  holidays, and shortened sessions.
-- Add `out_of_session_count`, `allowed_session_exception_count`, calendar
-  version, expected session minutes, observed session minutes, and missing edge
-  minutes to acceptance outputs.
-- Add a coverage profiler that reports per-month and per-symbol:
+- Exchange-session calendar seed: `data/trading-calendar/krx-korean-equity-v1.json`.
+- Coverage profiler day-set gate: `phase2-coverage --require-day-set`.
+- Coverage outputs include calendar version, expected/observed session minutes,
+  missing edge minutes, expected/observed trading days, missing trading days,
+  and day-set completion.
+- Coverage profiler reports per-month and per-symbol:
   - observed minutes
   - expected session minutes
   - coverage ratio
   - longest missing run
   - zero-volume count
   - first and last timestamp
-- Add a strict index acceptance command using the session calendar.
-- Add exact-bar trade-event mode to trade continuity checks.
-- Add a trade-continuity threshold to batch summaries, so runs can fail the
-  optimization gate while still writing operational artifacts.
+- Strict index acceptance requires both intraday continuity and an evaluated
+  month day-set. A passing seed-calendar report still has
+  `calendar_certified=false` until the day-set source is replaced or certified.
+- Monthly planning can consume coverage reports with `--coverage-report` so a
+  completed-month candidate is not selected from directory existence alone.
+- Exact-bar trade-event mode and batch optimization blocking are implemented for
+  sparse stock backtest summaries.
+
+## Required Next Implementation Work
+
+- Replace or certify the seeded calendar with a full official KRX/KIS-derived
+  day-set source before promoting long-range strategy conclusions.
+- Add categorized counters for invalid OHLC and negative derived value rather
+  than treating them only as parse/validation failures.
 - Add a strategy-metric view that reports valid-only PnL, invalid-only PnL, and
-  invalid-trade ratio separately.
+  invalid-trade ratio separately for optimization tables.
 
 ## Operational Rule
 
@@ -212,3 +226,9 @@ smoke checks before full monthly profiling. Long monthly runs must use
 Sparse stock backtests must pass `--trade-continuity-mode exact-bar`
 explicitly; the CLI default remains `dense-window` to preserve older grid-audit
 artifacts.
+Index/regime coverage must pass `--require-day-set` before a month can be
+selected for local rehearsal. Strategy validity or field-test promotion claims
+also require `calendar_certified=true` from an official KRX/KIS-derived day-set
+source. Monthly stock rehearsal plans may also pass
+`--coverage-report reports/phase2/stock-coverage-YYYYMM.json` so only coverage
+accepted months are selected.

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -41,7 +41,12 @@ def test_trade_continuity_passes_when_entry_and_exit_windows_are_complete():
     exit_ = datetime(2026, 5, 4, 9, 20, tzinfo=KST)
     bars = [_bar("A000001", entry + timedelta(minutes=offset)) for offset in range(-2, 13)]
 
-    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], window_minutes=2)
+    result = assess_trade_continuity(
+        bars,
+        [_trade("A000001", entry, exit_)],
+        window_minutes=2,
+        session_start=time(9, 0),
+    )
 
     assert result.status == "passed"
     assert result.checked_points == 2
@@ -58,7 +63,12 @@ def test_trade_continuity_fails_when_trade_window_has_missing_minutes():
         _bar("A000001", exit_),
     ]
 
-    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], window_minutes=2)
+    result = assess_trade_continuity(
+        bars,
+        [_trade("A000001", entry, exit_)],
+        window_minutes=2,
+        session_start=time(9, 0),
+    )
 
     assert result.status == "failed"
     assert result.checked_points == 2
@@ -76,7 +86,12 @@ def test_trade_continuity_ignores_minutes_outside_regular_session():
         _bar("A000001", exit_ - timedelta(minutes=2)),
     ]
 
-    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], window_minutes=2)
+    result = assess_trade_continuity(
+        bars,
+        [_trade("A000001", entry, exit_)],
+        window_minutes=2,
+        session_start=time(9, 0),
+    )
 
     assert result.status == "passed"
     assert result.checked_points == 2
@@ -84,6 +99,18 @@ def test_trade_continuity_ignores_minutes_outside_regular_session():
     assert result.missing_minutes == 0
     assert result.session_start == "09:00"
     assert result.session_end == "15:30"
+
+
+def test_trade_continuity_uses_calendar_regular_session_start_by_default():
+    entry = datetime(2026, 5, 4, 9, 0, tzinfo=KST)
+    exit_ = datetime(2026, 5, 4, 9, 2, tzinfo=KST)
+    bars = [_bar("A000001", exit_)]
+
+    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], audit_mode="exact-bar")
+
+    assert result.status == "failed"
+    assert result.session_start == "09:01"
+    assert result.checks[0].status == "out_of_session"
 
 
 def test_trade_continuity_flags_out_of_session_trades():
@@ -104,6 +131,17 @@ def test_trade_continuity_checks_session_in_korean_time_for_utc_timestamps():
     bars = [_bar("A000001", entry + timedelta(minutes=offset)) for offset in range(-2, 13)]
 
     result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], window_minutes=2)
+
+    assert result.status == "passed"
+    assert result.failed_points == 0
+
+
+def test_trade_continuity_uses_known_special_session_end():
+    entry = datetime(2025, 11, 13, 16, 28, tzinfo=KST)
+    exit_ = datetime(2025, 11, 13, 16, 30, tzinfo=KST)
+    bars = [_bar("A000001", entry), _bar("A000001", exit_)]
+
+    result = assess_trade_continuity(bars, [_trade("A000001", entry, exit_)], audit_mode="exact-bar")
 
     assert result.status == "passed"
     assert result.failed_points == 0

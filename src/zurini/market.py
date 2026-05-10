@@ -37,6 +37,8 @@ class Trade:
     gross_pnl: Decimal
     net_pnl: Decimal
     reason: str
+    ambiguous_intrabar: bool = False
+    execution_note: str = ""
 
 
 @dataclass(frozen=True)

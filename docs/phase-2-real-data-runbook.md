@@ -119,6 +119,7 @@ Use the phase-2 coverage profiler to apply the class-specific gate:
   --root data/raw/daishin/index-bars \
   --class-mode index-grid \
   --source daishin-historical \
+  --require-day-set \
   --output reports/phase2/index-coverage.json
 ```
 
@@ -134,6 +135,10 @@ because gaps exist:
   --progress-every 100 \
   --output reports/phase2/stock-coverage-202604.json
 ```
+
+Use `--require-day-set` when a stock month is being treated as a completed
+month for rehearsal planning. Without that flag, stock sparse coverage remains
+profiling evidence only and must not be used as a full month-completion proof.
 
 Backtest trade continuity keeps the legacy `dense-window` default for old
 artifacts. For sparse Phase 2 stock trade-event data, pass
@@ -158,14 +163,50 @@ month rehearsal set before running heavier DB backtests:
 .venv/bin/python -m zurini.cli phase2-monthly-plan \
   --root data/raw/daishin/minute-bars \
   --output-dir reports/phase2/monthly-rehearsal \
-  --limit-symbols 100
+  --limit-symbols 100 \
+  --coverage-report reports/phase2/stock-coverage-202604.json
 ```
 
 The plan excludes the current collecting month by default, selects the latest
 contiguous completed-month range, finds symbols common to every selected month,
 writes `monthly-plan.json`, and writes `backtest-paths.txt`. Use repeated
 `--month YYYYMM` arguments for a narrower contiguous range. The command rejects
-current/future months and non-contiguous explicit month selections.
+current/future months and non-contiguous explicit month selections. When
+coverage reports are supplied, directory existence is not enough: a month must
+have `acceptance_status=accepted`, `day_set_evaluated=true`, and
+`day_set_complete=true` to be selected for local rehearsal. Reports generated
+from the project-managed seed still carry `calendar_certified=false`, so they
+are not field-test promotable without a certified KRX/KIS-derived calendar.
+
+When a seed calendar would falsely reject whole months, build an observed index
+session block instead. This preserves continuous tradable ranges without
+promoting unknown calendar assumptions:
+
+```bash
+.venv/bin/python -m zurini.cli phase2-observed-plan \
+  --index-root data/raw/daishin/index-bars \
+  --stock-root data/raw/daishin/minute-bars \
+  --output-dir reports/phase2/observed-session \
+  --limit-symbols 100 \
+  --min-trading-days 20
+```
+
+The observed-session plan uses matching index minute grids to define tradable
+blocks, then selects a deterministic sparse stock universe for those block
+periods. The output is analysis/optimization rehearsal evidence only; official
+KRX/KIS calendar certification is still required before field-test promotion.
+
+Local operating evidence can be recorded without network, broker, account, or
+order side effects:
+
+```bash
+.venv/bin/python -m zurini.cli ops-status \
+  --report reports/phase2/monthly-rehearsal/monthly-plan.json \
+  --output reports/ops/status.json
+
+.venv/bin/python -m zurini.cli chaos-plan \
+  --output reports/ops/chaos-plan.json
+```
 
 ## Smoke Backtest
 

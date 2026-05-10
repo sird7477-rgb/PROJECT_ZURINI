@@ -1,0 +1,18 @@
+[dummy]
+symbols = ["ZRN001"]
+seed = 7477
+trading_day = "2026-01-05"
+minutes = 30
+
+[backtest]
+start_equity = "10000000"
+fee_rate = "0.00030"
+slippage_rate = "0.00100"
+profit_target = "0.03"
+hard_stop = "-0.03"
+day_end_exit = true
+intrabar_policy = "conservative"
+ambiguous_intrabar_policy = "stop-first"
+
+[output]
+directory = "reports/phase2/conservative"

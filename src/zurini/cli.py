@@ -5,11 +5,13 @@ import json
 import sys
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from zurini.backtest.engine import BacktestConfig, run_backtest
 from zurini.api_smoke import build_api_smoke_plan, run_api_smoke_network
+from zurini.chaos import build_safe_chaos_plan, write_safe_chaos_plan
 from zurini.data import db
 from zurini.data.acceptance import CsvAcceptanceCriteria, assess_csv_scan
 from zurini.data.continuity import assess_trade_continuity, summarize_trades_by_continuity
@@ -26,6 +28,10 @@ from zurini.data.large_dummy import (
     summarize_large_dummy_profile,
 )
 from zurini.market import Bar
+from zurini.observability import append_event_jsonl, build_event
+from zurini.observed_sessions import build_observed_session_plan, write_observed_session_plan
+from zurini.operations import build_local_ops_status, write_local_ops_status
+from zurini.strategies.baseline import VwapFirstPullbackStrategy
 from zurini.phase2 import (
     build_monthly_rehearsal_plan,
     build_phase2_batch_summary,
@@ -71,10 +77,18 @@ def main(argv: list[str] | None = None) -> int:
         return run_phase2_summarize_runs_command(args)
     if args.command == "phase2-coverage":
         return run_phase2_coverage_command(args)
+    if args.command == "phase2-observed-plan":
+        return run_phase2_observed_plan_command(args)
     if args.command == "api-smoke":
         return run_api_smoke_command(args)
     if args.command == "rehearse-large-dummy":
         return run_rehearse_large_dummy_command(args)
+    if args.command == "ops-status":
+        return run_ops_status_command(args)
+    if args.command == "record-event":
+        return run_record_event_command(args)
+    if args.command == "chaos-plan":
+        return run_chaos_plan_command(args)
     parser.print_help()
     return 2
 
@@ -103,6 +117,18 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest_csv.add_argument("--symbol", action="append", help="symbol override matching each --path; defaults to file stems")
     backtest_csv.add_argument("--source", default="sample")
     backtest_csv.add_argument("--limit-files", type=int, help="limit discovered CSV files for smoke runs")
+    backtest_csv.add_argument("--start-date", help="inclusive YYYY-MM-DD filter for loaded bars")
+    backtest_csv.add_argument("--end-date", help="inclusive YYYY-MM-DD filter for loaded bars")
+    backtest_csv.add_argument("--profit-target", help="override config backtest.profit_target")
+    backtest_csv.add_argument("--hard-stop", help="override config backtest.hard_stop")
+    backtest_csv.add_argument("--intrabar-policy", choices=["close-only", "conservative"], help="override config backtest.intrabar_policy")
+    backtest_csv.add_argument(
+        "--ambiguous-intrabar-policy",
+        choices=["stop-first"],
+        help="override config backtest.ambiguous_intrabar_policy",
+    )
+    backtest_csv.add_argument("--pullback-band", help="override VWAP pullback band")
+    backtest_csv.add_argument("--min-bid-ask-ratio", help="override VWAP pressure threshold")
     backtest_csv.add_argument("--output-dir", type=Path, default=Path("reports/sample-backtest"))
     backtest_csv.add_argument("--keep-db", action="store_true", help="do not reset market_bars before loading")
     backtest_csv.add_argument(
@@ -136,6 +162,13 @@ def _build_parser() -> argparse.ArgumentParser:
     phase2_plan.add_argument("--current-yyyymm", help="override current month boundary for tests/replays")
     phase2_plan.add_argument("--limit-symbols", type=int, default=100)
     phase2_plan.add_argument("--month", action="append", help="restrict to specific completed YYYYMM periods")
+    phase2_plan.add_argument(
+        "--coverage-report",
+        type=Path,
+        action="append",
+        default=[],
+        help="require accepted day-set coverage evidence for completed-month selection",
+    )
 
     phase2_summary = subparsers.add_parser(
         "phase2-summarize-runs",
@@ -157,7 +190,23 @@ def _build_parser() -> argparse.ArgumentParser:
     phase2_coverage.add_argument("--period", action="append", default=[], help="restrict to YYYYMM period directories")
     phase2_coverage.add_argument("--limit-files", type=int, help="limit files for bounded smoke profiling")
     phase2_coverage.add_argument("--progress-every", type=int, default=0, help="write progress to stderr every N files")
+    phase2_coverage.add_argument(
+        "--require-day-set",
+        action="store_true",
+        help="require every expected trading day in the month to be present",
+    )
     phase2_coverage.add_argument("--output", type=Path, default=Path("reports/phase2/coverage.json"))
+
+    observed_plan = subparsers.add_parser(
+        "phase2-observed-plan",
+        help="build an observed-index-session block plan without dropping whole partial months",
+    )
+    observed_plan.add_argument("--index-root", type=Path, default=Path("data/raw/daishin/index-bars"))
+    observed_plan.add_argument("--stock-root", type=Path, default=Path("data/raw/daishin/minute-bars"))
+    observed_plan.add_argument("--output-dir", type=Path, default=Path("reports/phase2/observed-session"))
+    observed_plan.add_argument("--limit-symbols", type=int, default=100)
+    observed_plan.add_argument("--min-trading-days", type=int, default=20)
+    observed_plan.add_argument("--select-block", default="", help="select a specific observed block name instead of the longest block")
 
     api_smoke = subparsers.add_parser("api-smoke", help="write a read-only API smoke-test plan")
     api_smoke.add_argument("--output", type=Path, default=Path("reports/api-smoke-plan.json"))
@@ -197,6 +246,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="guardrail that prevents accidental full local materialization on 16 GB PCs",
     )
     rehearse.add_argument("--keep-db", action="store_true", help="do not reset rehearsal tables before loading")
+
+    ops_status = subparsers.add_parser("ops-status", help="check local report artifacts without network or broker actions")
+    ops_status.add_argument("--report", type=Path, action="append", default=[], help="JSON report artifact to validate")
+    ops_status.add_argument("--output", type=Path, default=Path("reports/ops/status.json"))
+
+    record_event = subparsers.add_parser("record-event", help="append a redacted local operational JSONL event")
+    record_event.add_argument("--run-id", required=True)
+    record_event.add_argument("--event-type", required=True)
+    record_event.add_argument("--component", required=True)
+    record_event.add_argument("--status", required=True)
+    record_event.add_argument("--severity", default="info")
+    record_event.add_argument("--message", default="")
+    record_event.add_argument("--output", type=Path, default=Path("reports/ops/events.jsonl"))
+
+    chaos_plan = subparsers.add_parser("chaos-plan", help="write safe local fixture-based chaos-test plan")
+    chaos_plan.add_argument("--output", type=Path, default=Path("reports/ops/chaos-plan.json"))
     return parser
 
 
@@ -270,6 +335,7 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
     quality_reports = []
     for path, symbol in zip(paths, symbols, strict=True):
         loaded = load_daishin_minute_csv(path, symbol=symbol, source=args.source)
+        loaded = _filter_bars_by_date(loaded, start_date=args.start_date, end_date=args.end_date)
         bars.extend(loaded)
         quality_reports.append(build_csv_quality_report(loaded, source_path=path, symbol=symbol, source=args.source))
 
@@ -284,7 +350,9 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
         for symbol in report_symbols:
             loaded_from_db.extend(db.fetch_bars(symbol))
 
-    report, trades = run_backtest(loaded_from_db, config=config.backtest)
+    backtest_config = _override_backtest_config(config.backtest, args)
+    strategy_factory = _strategy_factory_from_args(args)
+    report, trades = run_backtest(loaded_from_db, config=backtest_config, strategy_factory=strategy_factory)
     continuity = assess_trade_continuity(loaded_from_db, trades, audit_mode=args.trade_continuity_mode)
     continuity_trades = summarize_trades_by_continuity(trades, continuity)
     outputs = write_backtest_outputs(
@@ -297,6 +365,16 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
         extra={
             "trade_continuity": continuity.as_dict(),
             "trade_continuity_summary": continuity_trades.as_dict(),
+            "phase2_parameters": {
+                "profit_target": str(backtest_config.profit_target),
+                "hard_stop": str(backtest_config.hard_stop),
+                "fee_rate": str(backtest_config.fee_rate),
+                "slippage_rate": str(backtest_config.slippage_rate),
+                "intrabar_policy": backtest_config.intrabar_policy,
+                "ambiguous_intrabar_policy": backtest_config.ambiguous_intrabar_policy,
+                "pullback_band": str(_decimal(args.pullback_band)) if args.pullback_band else "default",
+                "min_bid_ask_ratio": str(_decimal(args.min_bid_ask_ratio)) if args.min_bid_ask_ratio else "default",
+            },
         },
     )
     quality_path = args.output_dir / "csv-quality.json"
@@ -312,6 +390,29 @@ def run_backtest_csv_command(args: argparse.Namespace) -> int:
     print(f"report={outputs['json']}")
     print(f"quality_report={quality_path}")
     return 0
+
+
+def run_phase2_observed_plan_command(args: argparse.Namespace) -> int:
+    plan = build_observed_session_plan(
+        index_root=args.index_root,
+        stock_root=args.stock_root,
+        output_dir=args.output_dir,
+        limit_symbols=args.limit_symbols,
+        min_trading_days=args.min_trading_days,
+        select_block=args.select_block,
+    )
+    outputs = write_observed_session_plan(plan)
+    print(f"accepted_day_count={plan.accepted_day_count}")
+    print(f"rejected_day_count={plan.rejected_day_count}")
+    print(f"block_count={len(plan.blocks)}")
+    print(f"selected_block={plan.selected_block.name if plan.selected_block else ''}")
+    print(f"selected_dates={(plan.selected_block.start_date + '..' + plan.selected_block.end_date) if plan.selected_block else ''}")
+    print(f"selected_symbol_count={len(plan.selected_symbols)}")
+    print(f"path_count={len(plan.path_list)}")
+    print(f"plan={outputs['plan']}")
+    print(f"path_list={outputs['path_list']}")
+    print("recommended_command=" + " ".join(plan.recommended_command))
+    return 0 if plan.selected_block and plan.selected_symbols else 1
 
 
 def run_scan_csv_command(args: argparse.Namespace) -> int:
@@ -367,6 +468,7 @@ def run_phase2_monthly_plan_command(args: argparse.Namespace) -> int:
         current_yyyymm=args.current_yyyymm,
         limit_symbols=args.limit_symbols,
         requested_months=args.month,
+        coverage_reports=args.coverage_report,
     )
     outputs = write_monthly_rehearsal_plan(plan)
 
@@ -396,6 +498,7 @@ def run_phase2_summarize_runs_command(args: argparse.Namespace) -> int:
     print(f"total_net_pnl={summary.total_net_pnl}")
     print(f"total_valid_trades={summary.total_valid_trades}")
     print(f"total_invalid_trades={summary.total_invalid_trades}")
+    print(f"total_ambiguous_intrabar_trades={summary.total_ambiguous_intrabar_trades}")
     print(f"continuity_status={summary.continuity_status}")
     print(f"optimization_gate_status={summary.optimization_gate_status}")
     print(f"summary_json={args.output_json}")
@@ -411,6 +514,7 @@ def run_phase2_coverage_command(args: argparse.Namespace) -> int:
         periods=args.period,
         limit_files=args.limit_files,
         progress_every=args.progress_every,
+        require_day_set=args.require_day_set,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -420,6 +524,7 @@ def run_phase2_coverage_command(args: argparse.Namespace) -> int:
     print(f"root={summary.root}")
     print(f"class_mode={summary.class_mode}")
     print(f"calendar_version={summary.calendar_version}")
+    print(f"calendar_certified={str(summary.calendar_certified).lower()}")
     print(f"file_count={summary.file_count}")
     print(f"ok_count={summary.ok_count}")
     print(f"error_count={summary.error_count}")
@@ -429,10 +534,50 @@ def run_phase2_coverage_command(args: argparse.Namespace) -> int:
     print(f"missing_minutes_count={summary.missing_minutes_count}")
     print(f"longest_missing_run={summary.longest_missing_run}")
     print(f"missing_edge_minutes={summary.missing_edge_minutes}")
+    print(f"expected_trading_days={summary.expected_trading_days}")
+    print(f"observed_trading_days={summary.observed_trading_days}")
+    print(f"missing_trading_day_count={len(summary.missing_trading_days)}")
+    print(f"day_set_evaluated={str(summary.day_set_evaluated).lower()}")
+    print(f"day_set_complete={str(summary.day_set_complete).lower()}")
+    print(f"promotable_calendar={str(summary.promotable_calendar).lower()}")
     print(f"out_of_session_count={summary.out_of_session_count}")
     print(f"zero_volume_count={summary.zero_volume_count}")
     print(f"report={args.output}")
     return 0 if summary.acceptance_status == "accepted" else 1
+
+
+def run_ops_status_command(args: argparse.Namespace) -> int:
+    status = build_local_ops_status(args.report)
+    write_local_ops_status(status, args.output)
+    print(f"status={status.status}")
+    print(f"checked_report_count={len(status.checked_reports)}")
+    print(f"report={args.output}")
+    return 0 if status.status == "ok" else 1
+
+
+def run_record_event_command(args: argparse.Namespace) -> int:
+    event = build_event(
+        run_id=args.run_id,
+        event_type=args.event_type,
+        component=args.component,
+        status=args.status,
+        severity=args.severity,
+        message=args.message,
+    )
+    append_event_jsonl(args.output, event)
+    print(f"event_status={event.status}")
+    print(f"event_log={args.output}")
+    return 0
+
+
+def run_chaos_plan_command(args: argparse.Namespace) -> int:
+    plan = build_safe_chaos_plan()
+    write_safe_chaos_plan(plan, args.output)
+    print(f"status={plan.status}")
+    print(f"execution_mode={plan.execution_mode}")
+    print(f"scenario_count={len(plan.scenarios)}")
+    print(f"report={args.output}")
+    return 0
 
 
 def run_api_smoke_command(args: argparse.Namespace) -> int:
@@ -567,6 +712,8 @@ def load_config(path: Path, *, output_dir: Path | None = None) -> Phase1Config:
             profit_target=_decimal(backtest.get("profit_target", "0.03")),
             hard_stop=_decimal(backtest.get("hard_stop", "-0.03")),
             day_end_exit=_bool(backtest.get("day_end_exit", True)),
+            intrabar_policy=str(backtest.get("intrabar_policy", "close-only")),
+            ambiguous_intrabar_policy=str(backtest.get("ambiguous_intrabar_policy", "stop-first")),
             max_holding_minutes=(
                 int(backtest["max_holding_minutes"])
                 if backtest.get("max_holding_minutes") is not None
@@ -612,6 +759,46 @@ def _csv_paths(paths: list[Path], roots: list[Path], path_lists: list[Path] | No
     if not resolved:
         raise ValueError("at least one --path or --root is required")
     return list(dict.fromkeys(resolved))
+
+
+def _filter_bars_by_date(bars: list[Bar], *, start_date: str | None, end_date: str | None) -> list[Bar]:
+    if not start_date and not end_date:
+        return bars
+    start = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
+    end = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else None
+    if start and end and start > end:
+        raise ValueError("--start-date must be before or equal to --end-date")
+    return [
+        bar
+        for bar in bars
+        if (start is None or bar.timestamp.date() >= start)
+        and (end is None or bar.timestamp.date() <= end)
+    ]
+
+
+def _override_backtest_config(config: BacktestConfig, args: argparse.Namespace) -> BacktestConfig:
+    return BacktestConfig(
+        start_equity=config.start_equity,
+        fee_rate=config.fee_rate,
+        slippage_rate=config.slippage_rate,
+        profit_target=_decimal(args.profit_target) if getattr(args, "profit_target", None) else config.profit_target,
+        hard_stop=_decimal(args.hard_stop) if getattr(args, "hard_stop", None) else config.hard_stop,
+        day_end_exit=config.day_end_exit,
+        max_holding_minutes=config.max_holding_minutes,
+        intrabar_policy=getattr(args, "intrabar_policy", None) or config.intrabar_policy,
+        ambiguous_intrabar_policy=getattr(args, "ambiguous_intrabar_policy", None) or config.ambiguous_intrabar_policy,
+    )
+
+
+def _strategy_factory_from_args(args: argparse.Namespace):
+    pullback_band = getattr(args, "pullback_band", None)
+    min_bid_ask_ratio = getattr(args, "min_bid_ask_ratio", None)
+    if pullback_band is None and min_bid_ask_ratio is None:
+        return None
+    return lambda: VwapFirstPullbackStrategy(
+        pullback_band=_decimal(pullback_band or "0.005"),
+        min_bid_ask_ratio=_decimal(min_bid_ask_ratio or "2.0"),
+    )
 
 
 def _csv_symbols(paths: list[Path], symbols: list[str] | None) -> list[str]:

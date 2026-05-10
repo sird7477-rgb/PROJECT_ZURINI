@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +17,15 @@ class MonthlyDataset:
     file_count: int
     symbol_count: int
     status: str
+    coverage_status: str = "not-required"
+    calendar_version: str = ""
+    calendar_certified: bool = False
+    day_set_evaluated: bool = False
+    day_set_complete: bool = False
+    missing_trading_days: list[str] = field(default_factory=list)
+    expected_trading_days: int = 0
+    observed_trading_days: int = 0
+    coverage_report: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -36,6 +45,7 @@ class MonthlyRehearsalPlan:
     path_list_file: str
     plan_file: str
     recommended_command: list[str]
+    coverage_reports: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -54,6 +64,7 @@ class BacktestRunSummary:
     invalid_trades: int
     valid_net_pnl: str
     invalid_net_pnl: str
+    ambiguous_intrabar_trades: int
     continuity_status: str
     exit_reasons: dict[str, int]
 
@@ -73,9 +84,11 @@ class Phase2BatchSummary:
     total_invalid_trades: int
     total_valid_net_pnl: str
     total_invalid_net_pnl: str
+    total_ambiguous_intrabar_trades: int
     continuity_status: str
     invalid_trade_ratio: str
     invalid_net_pnl_ratio: str
+    ambiguous_intrabar_ratio: str
     optimization_gate_status: str
     exit_reasons: dict[str, int]
     reports: list[BacktestRunSummary]
@@ -93,6 +106,7 @@ def build_monthly_rehearsal_plan(
     current_yyyymm: str | None = None,
     limit_symbols: int = 100,
     requested_months: list[str] | None = None,
+    coverage_reports: list[Path] | None = None,
 ) -> MonthlyRehearsalPlan:
     root = Path(root)
     output_dir = Path(output_dir)
@@ -102,7 +116,14 @@ def build_monthly_rehearsal_plan(
         raise ValueError("--limit-symbols must be greater than zero")
 
     current = current_yyyymm or datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m")
-    months = _discover_months(root, current_yyyymm=current)
+    coverage_required = bool(coverage_reports)
+    coverage_by_period = _load_coverage_by_period(coverage_reports or [])
+    months = _discover_months(
+        root,
+        current_yyyymm=current,
+        coverage_required=coverage_required,
+        coverage_by_period=coverage_by_period,
+    )
     requested = set(requested_months or [])
     unknown = sorted(requested - {month.period for month in months})
     if unknown:
@@ -155,6 +176,7 @@ def build_monthly_rehearsal_plan(
         path_list_file=str(path_list_file),
         plan_file=str(plan_file),
         recommended_command=command,
+        coverage_reports=[str(path) for path in coverage_reports or []],
     )
 
 
@@ -200,17 +222,28 @@ def build_phase2_batch_summary(report_paths: list[Path]) -> Phase2BatchSummary:
         for reason, count in report.exit_reasons.items():
             exit_reasons[reason] = exit_reasons.get(reason, 0) + count
     total_invalid_trades = sum(report.invalid_trades for report in reports)
+    total_ambiguous_intrabar_trades = sum(report.ambiguous_intrabar_trades for report in reports)
     total_trade_count = sum(report.trade_count for report in reports)
     total_net_pnl = sum((_decimal(report.net_pnl) for report in reports), Decimal("0"))
     total_invalid_net_pnl = sum((_decimal(report.invalid_net_pnl) for report in reports), Decimal("0"))
     all_reports_passed = all(report.continuity_status == "passed" for report in reports)
-    continuity_status = "passed" if total_invalid_trades == 0 and all_reports_passed else "review-required"
+    continuity_status = (
+        "passed"
+        if total_invalid_trades == 0 and total_ambiguous_intrabar_trades == 0 and all_reports_passed
+        else "review-required"
+    )
     invalid_trade_ratio = _ratio(total_invalid_trades, total_trade_count)
     invalid_net_pnl_ratio = _net_pnl_ratio(total_invalid_net_pnl, total_net_pnl)
+    ambiguous_intrabar_ratio = _ratio(total_ambiguous_intrabar_trades, total_trade_count)
     # Keep the gate defensive even if an upstream report mislabels continuity.
     optimization_gate_status = (
         "passed"
-        if continuity_status == "passed" and invalid_trade_ratio == Decimal("0") and invalid_net_pnl_ratio == Decimal("0")
+        if (
+            continuity_status == "passed"
+            and invalid_trade_ratio == Decimal("0")
+            and invalid_net_pnl_ratio == Decimal("0")
+            and ambiguous_intrabar_ratio == Decimal("0")
+        )
         else "blocked"
     )
     return Phase2BatchSummary(
@@ -226,9 +259,11 @@ def build_phase2_batch_summary(report_paths: list[Path]) -> Phase2BatchSummary:
         total_invalid_trades=total_invalid_trades,
         total_valid_net_pnl=str(sum((_decimal(report.valid_net_pnl) for report in reports), Decimal("0"))),
         total_invalid_net_pnl=str(total_invalid_net_pnl),
+        total_ambiguous_intrabar_trades=total_ambiguous_intrabar_trades,
         continuity_status=continuity_status,
         invalid_trade_ratio=_format_decimal(invalid_trade_ratio),
         invalid_net_pnl_ratio=_format_decimal(invalid_net_pnl_ratio),
+        ambiguous_intrabar_ratio=_format_decimal(ambiguous_intrabar_ratio),
         optimization_gate_status=optimization_gate_status,
         exit_reasons=exit_reasons,
         reports=reports,
@@ -260,6 +295,7 @@ def _summarize_report(path: Path) -> BacktestRunSummary:
         invalid_trades=int(continuity_summary.get("invalid_trades", 0)),
         valid_net_pnl=str(continuity_summary.get("valid_net_pnl", report.get("net_pnl", "0"))),
         invalid_net_pnl=str(continuity_summary.get("invalid_net_pnl", "0")),
+        ambiguous_intrabar_trades=sum(1 for trade in trades if trade.get("ambiguous_intrabar")),
         continuity_status=str(continuity.get("status", "unknown")),
         exit_reasons=_exit_reasons(trades),
     )
@@ -304,9 +340,11 @@ def _batch_summary_markdown(summary: Phase2BatchSummary) -> str:
         f"- total_invalid_trades: {summary.total_invalid_trades}",
         f"- total_valid_net_pnl: {summary.total_valid_net_pnl}",
         f"- total_invalid_net_pnl: {summary.total_invalid_net_pnl}",
+        f"- total_ambiguous_intrabar_trades: {summary.total_ambiguous_intrabar_trades}",
         f"- continuity_status: {summary.continuity_status}",
         f"- invalid_trade_ratio: {summary.invalid_trade_ratio}",
         f"- invalid_net_pnl_ratio: {summary.invalid_net_pnl_ratio}",
+        f"- ambiguous_intrabar_ratio: {summary.ambiguous_intrabar_ratio}",
         f"- optimization_gate_status: {summary.optimization_gate_status}",
         "",
         "## Exit Reasons",
@@ -357,18 +395,30 @@ def _format_decimal(value: Decimal) -> str:
     return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
 
 
-def _discover_months(root: Path, *, current_yyyymm: str) -> list[MonthlyDataset]:
+def _discover_months(
+    root: Path,
+    *,
+    current_yyyymm: str,
+    coverage_required: bool = False,
+    coverage_by_period: dict[str, dict[str, Any]] | None = None,
+) -> list[MonthlyDataset]:
+    coverage_by_period = coverage_by_period or {}
     months: list[MonthlyDataset] = []
     for child in sorted(root.iterdir()):
         if not child.is_dir() or not _is_yyyymm(child.name):
             continue
         symbols = _symbols_for_month(child)
+        coverage = coverage_by_period.get(child.name, {})
         if child.name == current_yyyymm:
             status = "collecting-current-month"
         elif not symbols:
             status = "empty"
-        elif child.name < current_yyyymm:
+        elif child.name < current_yyyymm and not coverage_required:
             status = "completed-candidate"
+        elif child.name < current_yyyymm and _coverage_accepted(coverage):
+            status = "completed-candidate"
+        elif child.name < current_yyyymm:
+            status = "incomplete-dayset"
         else:
             status = "future"
         months.append(
@@ -378,9 +428,103 @@ def _discover_months(root: Path, *, current_yyyymm: str) -> list[MonthlyDataset]
                 file_count=len(symbols),
                 symbol_count=len(symbols),
                 status=status,
+                coverage_status=str(coverage.get("acceptance_status", "missing" if coverage_required else "not-required")),
+                calendar_version=str(coverage.get("calendar_version", "")),
+                calendar_certified=bool(coverage.get("calendar_certified", False)),
+                day_set_evaluated=bool(coverage.get("day_set_evaluated", False)),
+                day_set_complete=bool(coverage.get("day_set_complete", False)),
+                missing_trading_days=list(coverage.get("missing_trading_days", [])),
+                expected_trading_days=int(coverage.get("expected_trading_days", 0) or 0),
+                observed_trading_days=int(coverage.get("observed_trading_days", 0) or 0),
+                coverage_report=str(coverage.get("coverage_report", "")),
             )
         )
     return months
+
+
+def _load_coverage_by_period(paths: list[Path]) -> dict[str, dict[str, Any]]:
+    coverage_by_period: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        period_day_sets = payload.get("period_day_sets") or {}
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for result in payload.get("results", []):
+            period = _period_from_coverage_result(result)
+            if period:
+                buckets.setdefault(period, []).append(result)
+        for period, results in buckets.items():
+            period_day_set = period_day_sets.get(period, {}) if isinstance(period_day_sets, dict) else {}
+            missing_days = sorted(
+                set(period_day_set.get("missing_trading_days", []))
+                or {day for result in results for day in result.get("missing_trading_days", [])}
+            )
+            accepted = bool(results) and all(result.get("status") == "accepted" for result in results)
+            day_set_evaluated = bool(period_day_set.get("day_set_evaluated")) or (
+                bool(results) and all(bool(result.get("day_set_evaluated")) for result in results)
+            )
+            day_set_complete = bool(period_day_set.get("day_set_complete")) or (
+                bool(results) and all(bool(result.get("day_set_complete")) for result in results)
+            )
+            period_coverage = {
+                "acceptance_status": "accepted" if accepted and day_set_evaluated and day_set_complete else "review-required",
+                "calendar_version": payload.get("calendar_version", ""),
+                "calendar_certified": bool(payload.get("calendar_certified", False)),
+                "day_set_evaluated": day_set_evaluated,
+                "day_set_complete": day_set_complete,
+                "missing_trading_days": missing_days,
+                "expected_trading_days": int(period_day_set.get("expected_trading_days", 0) or 0)
+                or sum(int(result.get("expected_trading_days", 0) or 0) for result in results),
+                "observed_trading_days": int(period_day_set.get("observed_trading_days", 0) or 0)
+                or sum(int(result.get("observed_trading_days", 0) or 0) for result in results),
+                "coverage_report": str(path),
+            }
+            coverage_by_period[period] = _merge_period_coverage(coverage_by_period.get(period), period_coverage)
+    return coverage_by_period
+
+
+def _merge_period_coverage(
+    existing: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    if not existing:
+        return current
+    missing_days = sorted(set(existing.get("missing_trading_days", [])) | set(current.get("missing_trading_days", [])))
+    accepted = _coverage_accepted(existing) and _coverage_accepted(current)
+    return {
+        "acceptance_status": "accepted" if accepted else "review-required",
+        "calendar_version": current.get("calendar_version") or existing.get("calendar_version", ""),
+        "calendar_certified": bool(existing.get("calendar_certified", False)) and bool(current.get("calendar_certified", False)),
+        "day_set_evaluated": bool(existing.get("day_set_evaluated")) and bool(current.get("day_set_evaluated")),
+        "day_set_complete": bool(existing.get("day_set_complete")) and bool(current.get("day_set_complete")),
+        "missing_trading_days": missing_days,
+        "expected_trading_days": int(existing.get("expected_trading_days", 0) or 0)
+        + int(current.get("expected_trading_days", 0) or 0),
+        "observed_trading_days": int(existing.get("observed_trading_days", 0) or 0)
+        + int(current.get("observed_trading_days", 0) or 0),
+        "coverage_report": ";".join(
+            item for item in [str(existing.get("coverage_report", "")), str(current.get("coverage_report", ""))] if item
+        ),
+    }
+
+
+def _coverage_accepted(coverage: dict[str, Any]) -> bool:
+    return (
+        coverage.get("acceptance_status") == "accepted"
+        and bool(coverage.get("day_set_evaluated"))
+        and bool(coverage.get("day_set_complete"))
+    )
+
+
+def _period_from_coverage_result(result: dict[str, Any]) -> str:
+    raw_path = str(result.get("path", ""))
+    if not raw_path:
+        return ""
+    return _period_key(Path(raw_path))
+
+
+def _period_key(path: Path) -> str:
+    parent = path.parent.name
+    return parent if _is_yyyymm(parent) else ""
 
 
 def _common_symbols(root: Path, periods: list[str]) -> list[str]:
