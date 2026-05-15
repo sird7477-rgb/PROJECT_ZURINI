@@ -1,0 +1,39 @@
+{
+  "module_rules": [
+    {
+      "name": "kis_auth",
+      "destination": "{source_dir}/kis_auth.py",
+      "name_contains": ["auth", "token"],
+      "kinds": ["function", "class"]
+    },
+    {
+      "name": "kis_market_data",
+      "destination": "{source_dir}/kis_market_data.py",
+      "name_contains": ["quote", "depth", "daily_bar", "market_data"],
+      "kinds": ["function", "class"]
+    },
+    {
+      "name": "field_universe",
+      "destination": "{source_dir}/field_universe.py",
+      "name_contains": ["universe", "warmup", "source"],
+      "kinds": ["function", "class"]
+    },
+    {
+      "name": "risk_controls",
+      "destination": "{source_dir}/risk_controls.py",
+      "name_contains": ["risk", "kill", "loss", "duplicate"],
+      "kinds": ["function", "class"]
+    },
+    {
+      "name": "order_intents",
+      "destination": "{source_dir}/order_intents.py",
+      "name_contains": ["order", "intent", "position"],
+      "kinds": ["function", "class"]
+    }
+  ],
+  "notes": [
+    "These rules produce proposals only.",
+    "Do not apply moves without dry-run review, tests, and explicit approval.",
+    "Do not use split rules to change strategy behavior or broker permissions."
+  ]
+}

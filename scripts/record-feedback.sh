@@ -117,6 +117,7 @@ entry = {
     "repeat_key": sys.argv[3],
     "summary": sys.argv[4],
     "severity": sys.argv[6],
+    "status": "open",
     "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
 }
 

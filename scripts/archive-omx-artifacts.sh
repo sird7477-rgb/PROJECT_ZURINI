@@ -7,10 +7,11 @@ THRESHOLD="${OMX_REVIEW_ARCHIVE_THRESHOLD:-${OMX_ARTIFACT_WARN_COUNT:-200}}"
 KEEP_FILES="${OMX_REVIEW_ARCHIVE_KEEP_FILES:-}"
 MODE="archive"
 DRY_RUN=0
+CONFIRM_DELETE=0
 
 usage() {
   cat <<'USAGE'
-Usage: ./scripts/archive-omx-artifacts.sh [--dry-run] [--delete]
+Usage: ./scripts/archive-omx-artifacts.sh [--dry-run] [--delete --confirm-delete]
 
 Archive old .omx review artifacts while preserving recent session evidence.
 
@@ -18,7 +19,7 @@ Default behavior:
   - only acts when .omx/review-results exceeds OMX_REVIEW_ARCHIVE_THRESHOLD
   - preserves the newest OMX_REVIEW_ARCHIVE_KEEP_FILES files
   - moves older files to .omx/review-results/archive/YYYYMMDD/
-  - never deletes unless --delete is explicitly supplied
+  - never deletes unless --delete and --confirm-delete are both explicitly supplied
 
 Environment:
   OMX_REVIEW_RESULTS_DIR=PATH        review result directory
@@ -36,6 +37,9 @@ while [ "$#" -gt 0 ]; do
     --delete)
       MODE="delete"
       ;;
+    --confirm-delete)
+      CONFIRM_DELETE=1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -49,6 +53,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$MODE" = "delete" ] && [ "$DRY_RUN" -ne 1 ] && [ "$CONFIRM_DELETE" -ne 1 ]; then
+  echo "[archive] refusing deletion without --confirm-delete; use archive mode or dry-run first" >&2
+  exit 2
+fi
 
 for numeric in THRESHOLD KEEP_FILES; do
   if [ "$numeric" = "KEEP_FILES" ] && [ -z "$KEEP_FILES" ]; then
@@ -256,7 +265,11 @@ done < <(
     | tail -n +"$((KEEP_FILES + 1))"
 )
 
-if [ "$MODE" = "delete" ]; then
+if [ "$DRY_RUN" -eq 1 ] && [ "$MODE" = "delete" ]; then
+  echo "[archive] would delete ${move_count} old review artifact files; kept newest ${KEEP_FILES}"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  echo "[archive] would archive ${move_count} old review artifact files to ${archive_target}; kept newest ${KEEP_FILES}"
+elif [ "$MODE" = "delete" ]; then
   echo "[archive] deleted ${move_count} old review artifact files; kept newest ${KEEP_FILES}"
 else
   echo "[archive] archived ${move_count} old review artifact files to ${archive_target}; kept newest ${KEEP_FILES}"

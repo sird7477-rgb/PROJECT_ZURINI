@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${OUT_DIR:-.omx/review-results}"
 CONTEXT_DIR="${CONTEXT_DIR:-.omx/review-context}"
 PROMPT_DIR="${PROMPT_DIR:-.omx/review-prompts}"
@@ -12,7 +13,13 @@ REVIEW_TIMEOUT_KILL_AFTER_SECONDS="${REVIEW_TIMEOUT_KILL_AFTER_SECONDS:-5}"
 CLAUDE_REVIEW_TIMEOUT_SECONDS="${CLAUDE_REVIEW_TIMEOUT_SECONDS:-300}"
 GEMINI_REVIEW_TIMEOUT_SECONDS="${GEMINI_REVIEW_TIMEOUT_SECONDS:-${REVIEW_TIMEOUT_SECONDS}}"
 CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS="${CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS:-300}"
+CLAUDE_PROMPT_ARG_MAX_BYTES="${CLAUDE_PROMPT_ARG_MAX_BYTES:-100000}"
 GEMINI_PROMPT_ARG_MAX_BYTES="${GEMINI_PROMPT_ARG_MAX_BYTES:-100000}"
+GEMINI_PROMPT_MAX_BYTES="${GEMINI_PROMPT_MAX_BYTES:-750000}"
+REVIEW_CONTEXT_MAX_BYTES="${REVIEW_CONTEXT_MAX_BYTES:-750000}"
+REVIEW_CONTEXT_DETAIL="${REVIEW_CONTEXT_DETAIL:-auto}"
+REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES="${REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES:-50000}"
+REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES="${REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES:-80}"
 REVIEW_RETRY_LIMIT="${REVIEW_RETRY_LIMIT:-3}"
 REVIEW_OUTPUT_MODE="${REVIEW_OUTPUT_MODE:-file}"
 SKIP_CONTEXT_GENERATION="${SKIP_CONTEXT_GENERATION:-0}"
@@ -24,16 +31,24 @@ AI_MODEL_ROUTING_REPORT="${AI_MODEL_ROUTING_REPORT:-${AI_MODEL_DISCOVERY_DIR}/la
 
 mkdir -p "${OUT_DIR}" "${CONTEXT_DIR}" "${PROMPT_DIR}" "${EXTERNAL_REVIEW_DIR}" "${REVIEW_STATE_DIR}" "${AI_MODEL_DISCOVERY_DIR}"
 
+# shellcheck source=scripts/lib-review-verdict.sh
+. "${SCRIPT_DIR}/lib-review-verdict.sh"
+
 if [ "${SKIP_CONTEXT_GENERATION}" = "1" ]; then
   echo "[review] using existing review context and prompts..."
   CONTEXT_FILE="$(find "${CONTEXT_DIR}" -maxdepth 1 -type f \( -name 'review-context-*.md' -o -name 'latest-review-context.md' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
   CONTEXT_FILE="${CONTEXT_FILE:-existing context in ${CONTEXT_DIR}}"
 else
   echo "[review] collecting review context..."
-  CONTEXT_FILE="$(OUT_DIR="${CONTEXT_DIR}" INCLUDE_UNTRACKED_CONTENT="${REVIEW_INCLUDE_UNTRACKED_CONTENT}" ./scripts/collect-review-context.sh)"
+  CONTEXT_FILE="$(OUT_DIR="${CONTEXT_DIR}" INCLUDE_UNTRACKED_CONTENT="${REVIEW_INCLUDE_UNTRACKED_CONTENT}" REVIEW_CONTEXT_DETAIL="${REVIEW_CONTEXT_DETAIL}" REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES="${REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES}" REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES="${REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES}" ./scripts/collect-review-context.sh)"
 
   echo "[review] generating review prompts..."
-  OUT_DIR="${PROMPT_DIR}" ./scripts/make-review-prompts.sh "${CONTEXT_FILE}" >/dev/null
+  OUT_DIR="${PROMPT_DIR}" REVIEW_CONTEXT_MAX_BYTES="${REVIEW_CONTEXT_MAX_BYTES}" ./scripts/make-review-prompts.sh "${CONTEXT_FILE}" >/dev/null
+fi
+
+CODEX_FALLBACK_CONTEXT_FILE="${CONTEXT_FILE}"
+if [ -f "${PROMPT_DIR}/focused-review-context.md" ]; then
+  CODEX_FALLBACK_CONTEXT_FILE="${PROMPT_DIR}/focused-review-context.md"
 fi
 
 CLAUDE_PROMPT="${PROMPT_DIR}/claude-review.md"
@@ -45,14 +60,116 @@ if [ ! -f "${CLAUDE_PROMPT}" ] || [ ! -f "${GEMINI_PROMPT}" ]; then
 fi
 
 TIMESTAMP="$(date +%Y%m%dT%H%M%S)"
+REVIEW_RUN_ID_RAW="${REVIEW_RUN_ID:-${TIMESTAMP}}"
+REVIEW_RUN_ID="$(printf '%s' "${REVIEW_RUN_ID_RAW}" | sed 's/[^A-Za-z0-9_.-]/_/g')"
+if [ -z "${REVIEW_RUN_ID}" ]; then
+  REVIEW_RUN_ID="${TIMESTAMP}"
+fi
 CLAUDE_OUT="${OUT_DIR}/claude-review-${TIMESTAMP}.md"
 GEMINI_OUT="${OUT_DIR}/gemini-review-${TIMESTAMP}.md"
 CODEX_ARCHITECT_FALLBACK_OUT="${OUT_DIR}/codex-architect-fallback-${TIMESTAMP}.md"
 CODEX_TEST_FALLBACK_OUT="${OUT_DIR}/codex-test-fallback-${TIMESTAMP}.md"
 CODEX_FALLBACK_SUMMARY_OUT="${OUT_DIR}/codex-fallback-summary-${TIMESTAMP}.md"
 SUMMARY_OUT="${OUT_DIR}/review-summary-${TIMESTAMP}.md"
+MANIFEST_OUT="${OUT_DIR}/review-run-${REVIEW_RUN_ID}.md"
 EXTERNAL_RUNNER="${EXTERNAL_REVIEW_DIR}/run-reviewers-${TIMESTAMP}.sh"
 EXTERNAL_LATEST="${EXTERNAL_REVIEW_DIR}/run-reviewers-latest.sh"
+
+reviewer_disabled_file() {
+  echo "${REVIEW_STATE_DIR}/$1.disabled"
+}
+
+reset_disabled_reviewers() {
+  case "${RESET_DISABLED_AI_REVIEWERS:-}" in
+    all)
+      rm -f "${REVIEW_STATE_DIR}/claude.disabled" "${REVIEW_STATE_DIR}/gemini.disabled"
+      ;;
+    claude)
+      rm -f "${REVIEW_STATE_DIR}/claude.disabled"
+      ;;
+    gemini)
+      rm -f "${REVIEW_STATE_DIR}/gemini.disabled"
+      ;;
+    "")
+      ;;
+    *)
+      echo "[review] unknown RESET_DISABLED_AI_REVIEWERS value: ${RESET_DISABLED_AI_REVIEWERS}"
+      ;;
+  esac
+}
+
+disabled_reason() {
+  local reviewer="$1"
+  local disabled_file
+  disabled_file="$(reviewer_disabled_file "${reviewer}")"
+
+  if [ ! -f "${disabled_file}" ]; then
+    return 1
+  fi
+
+  local reason details disabled_at source_run_id next_action reset_hint
+  reason="$(sed -n 's/^reason=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+  details="$(sed -n 's/^details=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+  disabled_at="$(sed -n 's/^disabled_at=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+  source_run_id="$(sed -n 's/^source_run_id=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+  next_action="$(sed -n 's/^next_action=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+  reset_hint="$(sed -n 's/^reset_hint=//p' "${disabled_file}" 2>/dev/null | head -n 1)"
+
+  echo "reason=${reason}; details=${details}; disabled_at=${disabled_at}; source_run_id=${source_run_id:-unknown}; next_action=${next_action:-user_reset_required}; reset_hint=${reset_hint:-RESET_DISABLED_AI_REVIEWERS=${reviewer} ./scripts/review-gate.sh}"
+}
+
+disabled_reviewers_summary() {
+  local found=0
+  local reviewer reason
+
+  for reviewer in claude gemini; do
+    if reason="$(disabled_reason "${reviewer}")"; then
+      found=1
+      echo "- ${reviewer}: ${reason}"
+    fi
+  done
+
+  if [ "${found}" -eq 0 ]; then
+    echo "- none"
+  fi
+}
+
+write_run_manifest() {
+  cat > "${MANIFEST_OUT}" <<MANIFEST
+# AI Review Run Manifest
+
+Generated at: $(date -Iseconds)
+
+## Run
+
+- Review run id: ${REVIEW_RUN_ID}
+- Execution mode: ${REVIEW_EXECUTION_MODE}
+- Context: ${CONTEXT_FILE}
+- Claude prompt: ${CLAUDE_PROMPT}
+- Gemini prompt: ${GEMINI_PROMPT}
+- Model routing report: ${AI_MODEL_ROUTING_REPORT}
+- Model routing cache status: ${AI_MODEL_ROUTING_CACHE_STATUS:-unknown}
+- Model routing cache age seconds: ${AI_MODEL_ROUTING_CACHE_AGE_SECONDS:-unknown}
+- Model routing cache TTL seconds: ${AI_MODEL_ROUTING_CACHE_TTL_SECONDS:-unknown}
+
+## Outputs
+
+- Claude result: ${CLAUDE_OUT}
+- Gemini result: ${GEMINI_OUT}
+- Codex architect fallback: ${CODEX_ARCHITECT_FALLBACK_OUT}
+- Codex test fallback: ${CODEX_TEST_FALLBACK_OUT}
+- Codex fallback summary: ${CODEX_FALLBACK_SUMMARY_OUT}
+- Review summary: ${SUMMARY_OUT}
+- External runner: ${EXTERNAL_RUNNER}
+- Latest external runner: ${EXTERNAL_LATEST}
+
+## Disabled Reviewers At Manifest Time
+
+$(disabled_reviewers_summary)
+MANIFEST
+}
+
+reset_disabled_reviewers
 
 write_external_runner() {
   cat > "${EXTERNAL_RUNNER}" <<SCRIPT
@@ -76,7 +193,13 @@ cd "\${repo_root}"
 : "\${CLAUDE_REVIEW_TIMEOUT_SECONDS:=${CLAUDE_REVIEW_TIMEOUT_SECONDS}}"
 : "\${GEMINI_REVIEW_TIMEOUT_SECONDS:=${GEMINI_REVIEW_TIMEOUT_SECONDS}}"
 : "\${CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS:=${CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS}}"
+: "\${CLAUDE_PROMPT_ARG_MAX_BYTES:=${CLAUDE_PROMPT_ARG_MAX_BYTES}}"
 : "\${GEMINI_PROMPT_ARG_MAX_BYTES:=${GEMINI_PROMPT_ARG_MAX_BYTES}}"
+: "\${GEMINI_PROMPT_MAX_BYTES:=${GEMINI_PROMPT_MAX_BYTES}}"
+: "\${REVIEW_CONTEXT_MAX_BYTES:=${REVIEW_CONTEXT_MAX_BYTES}}"
+: "\${REVIEW_CONTEXT_DETAIL:=${REVIEW_CONTEXT_DETAIL}}"
+: "\${REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES:=${REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES}}"
+: "\${REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES:=${REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES}}"
 : "\${REVIEW_RETRY_LIMIT:=${REVIEW_RETRY_LIMIT}}"
 : "\${REVIEW_OUTPUT_MODE:=tee}"
 : "\${SKIP_CONTEXT_GENERATION:=1}"
@@ -85,6 +208,11 @@ cd "\${repo_root}"
 : "\${AI_MODEL_DISCOVERY_DIR:=${AI_MODEL_DISCOVERY_DIR}}"
 : "\${AI_MODEL_ROUTING_ENV:=${AI_MODEL_ROUTING_ENV}}"
 : "\${AI_MODEL_ROUTING_REPORT:=${AI_MODEL_ROUTING_REPORT}}"
+: "\${AI_MODEL_ROUTING_OBSERVATIONS:=}"
+: "\${AI_MODEL_DISCOVERY_REFRESH:=${AI_MODEL_DISCOVERY_REFRESH:-0}}"
+: "\${AI_MODEL_ROUTING_TTL_SECONDS:=${AI_MODEL_ROUTING_TTL_SECONDS:-43200}}"
+: "\${CLAUDE_REVIEW_MODEL_AUTO:=${CLAUDE_REVIEW_MODEL_AUTO:-0}}"
+: "\${REVIEW_RUN_ID:=${REVIEW_RUN_ID}}"
 
 REVIEW_EXECUTION_MODE=local \\
 OUT_DIR="\${OUT_DIR}" \\
@@ -96,7 +224,13 @@ REVIEW_TIMEOUT_KILL_AFTER_SECONDS="\${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" \\
 CLAUDE_REVIEW_TIMEOUT_SECONDS="\${CLAUDE_REVIEW_TIMEOUT_SECONDS}" \\
 GEMINI_REVIEW_TIMEOUT_SECONDS="\${GEMINI_REVIEW_TIMEOUT_SECONDS}" \\
 CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS="\${CODEX_FALLBACK_REVIEW_TIMEOUT_SECONDS}" \\
+CLAUDE_PROMPT_ARG_MAX_BYTES="\${CLAUDE_PROMPT_ARG_MAX_BYTES}" \\
 GEMINI_PROMPT_ARG_MAX_BYTES="\${GEMINI_PROMPT_ARG_MAX_BYTES}" \\
+GEMINI_PROMPT_MAX_BYTES="\${GEMINI_PROMPT_MAX_BYTES}" \\
+REVIEW_CONTEXT_MAX_BYTES="\${REVIEW_CONTEXT_MAX_BYTES}" \\
+REVIEW_CONTEXT_DETAIL="\${REVIEW_CONTEXT_DETAIL}" \\
+REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES="\${REVIEW_LIGHTWEIGHT_DIFF_MAX_BYTES}" \\
+REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES="\${REVIEW_LIGHTWEIGHT_VERIFY_TAIL_LINES}" \\
 REVIEW_RETRY_LIMIT="\${REVIEW_RETRY_LIMIT}" \\
 REVIEW_OUTPUT_MODE="\${REVIEW_OUTPUT_MODE}" \\
 SKIP_CONTEXT_GENERATION="\${SKIP_CONTEXT_GENERATION}" \\
@@ -105,6 +239,11 @@ AI_MODEL_DISCOVERY="\${AI_MODEL_DISCOVERY}" \\
 AI_MODEL_DISCOVERY_DIR="\${AI_MODEL_DISCOVERY_DIR}" \\
 AI_MODEL_ROUTING_ENV="\${AI_MODEL_ROUTING_ENV}" \\
 AI_MODEL_ROUTING_REPORT="\${AI_MODEL_ROUTING_REPORT}" \\
+AI_MODEL_ROUTING_OBSERVATIONS="\${AI_MODEL_ROUTING_OBSERVATIONS}" \\
+AI_MODEL_DISCOVERY_REFRESH="\${AI_MODEL_DISCOVERY_REFRESH}" \\
+AI_MODEL_ROUTING_TTL_SECONDS="\${AI_MODEL_ROUTING_TTL_SECONDS}" \\
+CLAUDE_REVIEW_MODEL_AUTO="\${CLAUDE_REVIEW_MODEL_AUTO}" \\
+REVIEW_RUN_ID="\${REVIEW_RUN_ID}" \\
 ./scripts/run-ai-reviews.sh
 
 RESULT_DIR="\${OUT_DIR}" OUT_DIR="\${OUT_DIR}" ./scripts/summarize-ai-reviews.sh
@@ -142,35 +281,22 @@ Latest external reviewer command:
 ## Notes
 
 External mode prepares the review context and prompts, then stops before invoking reviewer CLIs in this restricted agent-run context.
+
+Disabled reviewer state is shared with the generated external runner. If a reviewer is listed below, the external runner will also skip it until reset.
+
+$(disabled_reviewers_summary)
 SUMMARY
 
+  write_run_manifest
   echo "[review] external reviewer runner: ${EXTERNAL_RUNNER}"
   echo "[review] latest external reviewer runner: ${EXTERNAL_LATEST}"
+  echo "[review] run manifest: ${MANIFEST_OUT}"
   echo "[review] summary: ${SUMMARY_OUT}"
+  echo "[review] disabled reviewers for external runner:"
+  disabled_reviewers_summary
   echo "[review] external review pending"
   exit 2
 fi
-
-reset_disabled_reviewers() {
-  case "${RESET_DISABLED_AI_REVIEWERS:-}" in
-    all)
-      rm -f "${REVIEW_STATE_DIR}/claude.disabled" "${REVIEW_STATE_DIR}/gemini.disabled"
-      ;;
-    claude)
-      rm -f "${REVIEW_STATE_DIR}/claude.disabled"
-      ;;
-    gemini)
-      rm -f "${REVIEW_STATE_DIR}/gemini.disabled"
-      ;;
-    "")
-      ;;
-    *)
-      echo "[review] unknown RESET_DISABLED_AI_REVIEWERS value: ${RESET_DISABLED_AI_REVIEWERS}"
-      ;;
-  esac
-}
-
-reset_disabled_reviewers
 
 load_model_routing() {
   if [ "${AI_MODEL_DISCOVERY}" = "0" ]; then
@@ -191,7 +317,13 @@ load_model_routing() {
     # shellcheck disable=SC1090
     . "${AI_MODEL_ROUTING_ENV}"
     echo "[review] model routing report: ${AI_MODEL_ROUTING_REPORT}"
-    echo "[review] selected models: claude=${CLAUDE_REVIEW_MODEL:-provider-default} gemini=${GEMINI_REVIEW_MODEL:-provider-default} codex_architect=${CODEX_ARCHITECT_REVIEW_MODEL:-provider-default} codex_test=${CODEX_TEST_REVIEW_MODEL:-provider-default}"
+    if [ -n "${AI_MODEL_ROUTING_DISCOVERED_EPOCH:-}" ] && printf '%s\n' "${AI_MODEL_ROUTING_DISCOVERED_EPOCH}" | grep -Eq '^[0-9]+$'; then
+      routing_age=$(( $(date +%s) - AI_MODEL_ROUTING_DISCOVERED_EPOCH ))
+      if [ "${routing_age}" -ge 0 ]; then
+        echo "[review] model routing cache: ${AI_MODEL_ROUTING_CACHE_STATUS:-unknown}, age=${routing_age}s, ttl=${AI_MODEL_ROUTING_CACHE_TTL_SECONDS:-unknown}s"
+      fi
+    fi
+    echo "[review] selected models: claude(${CLAUDE_REVIEW_ROLE:-review})=${CLAUDE_REVIEW_MODEL:-provider-default} gemini(${GEMINI_REVIEW_ROLE:-review})=${GEMINI_REVIEW_MODEL:-provider-default} codex_architect(${CODEX_ARCHITECT_REVIEW_ROLE:-fallback})=${CODEX_ARCHITECT_REVIEW_MODEL:-provider-default} codex_test(${CODEX_TEST_REVIEW_ROLE:-fallback})=${CODEX_TEST_REVIEW_MODEL:-provider-default}"
   else
     echo "[review] AI model discovery failed; using provider defaults"
   fi
@@ -202,10 +334,6 @@ help_supports_flag() {
   local flag="$2"
 
   printf '%s\n' "${help_text}" | grep -Eq "(^|[^[:alnum:]_-])${flag}($|[^[:alnum:]_-])"
-}
-
-reviewer_disabled_file() {
-  echo "${REVIEW_STATE_DIR}/$1.disabled"
 }
 
 disable_reviewer() {
@@ -220,25 +348,85 @@ disable_reviewer() {
     echo "disabled_at=$(date -Iseconds)"
     echo "reason=${reason}"
     echo "details=${details}"
+    echo "source_run_id=${REVIEW_RUN_ID}"
+    echo "next_action=user_reset_required"
+    echo "reset_hint=RESET_DISABLED_AI_REVIEWERS=${reviewer} ./scripts/review-gate.sh"
   } > "${disabled_file}"
 
   echo "[review] ${reviewer} review disabled until user re-enables it: ${reason} (${details})"
 }
 
-disabled_reason() {
-  local reviewer="$1"
-  local disabled_file
-  disabled_file="$(reviewer_disabled_file "${reviewer}")"
+failure_details() {
+  local output_file="$1"
+  local status="$2"
+  local class="unknown"
+  local tail_text
 
-  if [ ! -f "${disabled_file}" ]; then
-    return 1
+  if grep -qiE 'heap out of memory|JavaScript heap|allocation failed|out of memory|ENOMEM' "${output_file}" 2>/dev/null; then
+    class="oom"
+  elif grep -qiE 'trust folder|trusted folder|trust.*workspace|workspace.*trust|skip-trust' "${output_file}" 2>/dev/null; then
+    class="trust_required"
+  elif grep -qiE 'ECONNREFUSED|ConnectionRefused|connection refused|network.*blocked|sandbox|read-only file system|EROFS' "${output_file}" 2>/dev/null; then
+    class="network_or_sandbox"
+  elif grep -qiE 'timed out|timeout|SIGTERM|Killed' "${output_file}" 2>/dev/null; then
+    class="timeout_or_killed"
+  elif grep -qiE 'auth|login|credential|permission denied|unauthorized|forbidden' "${output_file}" 2>/dev/null; then
+    class="auth_or_permission"
+  elif is_limit_failure "${output_file}"; then
+    class="usage_limit"
+  elif [ "${status}" -eq 0 ]; then
+    class="no_usable_verdict"
+  else
+    class="command_failed"
   fi
 
-  local reason details disabled_at
-  reason="$(sed -n 's/^reason=//p' "${disabled_file}")"
-  details="$(sed -n 's/^details=//p' "${disabled_file}")"
-  disabled_at="$(sed -n 's/^disabled_at=//p' "${disabled_file}")"
-  echo "reason=${reason}; details=${details}; disabled_at=${disabled_at}"
+  tail_text="$(tail -20 "${output_file}" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-500)"
+  printf 'class=%s; exit_status=%s; tail=%s' "${class}" "${status}" "${tail_text:-none}"
+  if [ -n "${REVIEWER_PREFLIGHT_DETAILS:-}" ]; then
+    printf '; preflight=%s' "${REVIEWER_PREFLIGHT_DETAILS}"
+  fi
+}
+
+preflight_details() {
+  local reviewer="$1"
+  local help_text="$2"
+  local prompt_file="$3"
+  local prompt_bytes
+  prompt_bytes="$(wc -c < "${prompt_file}")"
+
+  case "${reviewer}" in
+    gemini)
+      printf 'prompt_bytes=%s' "${prompt_bytes}"
+      if printf '%s\n' "${help_text}" | grep -q -- '--prompt'; then
+        printf ',prompt_flag=yes'
+      else
+        printf ',prompt_flag=no'
+      fi
+      if printf '%s\n' "${help_text}" | grep -q -- '--skip-trust'; then
+        printf ',skip_trust=yes'
+      else
+        printf ',skip_trust=no'
+      fi
+      if [ -n "${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" ]; then
+        printf ',api_env=present'
+      else
+        printf ',api_env=missing'
+      fi
+      ;;
+    claude)
+      printf 'prompt_bytes=%s' "${prompt_bytes}"
+      if printf '%s\n' "${help_text}" | grep -q -- '--print'; then
+        printf ',print_flag=yes'
+      else
+        printf ',print_flag=no'
+      fi
+      if printf '%s\n' "${help_text}" | grep -q -- '--permission-mode'; then
+        printf ',permission_mode=yes'
+      else
+        printf ',permission_mode=no'
+      fi
+      ;;
+  esac
 }
 
 write_disabled_result() {
@@ -265,42 +453,6 @@ is_limit_failure() {
   local output_file="$1"
 
   grep -qiE 'hit your limit|usage limit|session limit|weekly limit|week limit|rate limit|quota|RESOURCE_EXHAUSTED|resets [0-9]|resets [ap]m|limit reached' "${output_file}"
-}
-
-has_usable_verdict() {
-  local output_file="$1"
-
-  awk '
-    BEGIN { in_verdict = 0; in_code = 0 }
-    /^```/ {
-      in_code = !in_code
-      next
-    }
-    in_code {
-      next
-    }
-    tolower($0) ~ /^#+[[:space:]]+verdict[[:space:]:.-]*$/ { in_verdict = 1; next }
-    in_verdict && /^#+[[:space:]]+/ { exit }
-    in_verdict && /^[[:space:]]*$/ { next }
-    in_verdict {
-      if ($0 ~ /^[[:space:]]*>/) {
-        next
-      }
-      if ($0 ~ /^[[:space:]]*([-*+]|\(?[0-9]+[.)])([[:space:]]|$)/) {
-        next
-      }
-      verdict = tolower($0)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", verdict)
-      gsub(/^`+|`+$/, "", verdict)
-      gsub(/^\*\*|\*\*$/, "", verdict)
-      gsub(/[^a-z_]/, "", verdict)
-      if (verdict == "approve" || verdict == "approve_with_notes" || verdict == "request_changes") {
-        found = 1
-        exit
-      }
-    }
-    END { exit found ? 0 : 1 }
-  ' "${output_file}"
 }
 
 run_review_command() {
@@ -346,7 +498,7 @@ run_with_retries() {
     fi
 
     if is_limit_failure "${output_file}"; then
-      disable_reviewer "${reviewer}" "usage_limit" "reviewer reported a session, weekly, quota, or rate limit"
+      disable_reviewer "${reviewer}" "usage_limit" "$(failure_details "${output_file}" "${status}")"
       return "${status}"
     fi
 
@@ -359,7 +511,7 @@ run_with_retries() {
     attempt=$((attempt + 1))
   done
 
-  disable_reviewer "${reviewer}" "retry_exhausted" "no usable response after ${REVIEW_RETRY_LIMIT} attempts"
+  disable_reviewer "${reviewer}" "retry_exhausted" "$(failure_details "${output_file}" "${status}")"
   return "${status}"
 }
 
@@ -394,8 +546,10 @@ MSG
 
   set +e
   claude_help="$(claude --help 2>/dev/null)"
+  REVIEWER_PREFLIGHT_DETAILS="$(preflight_details claude "${claude_help}" "${CLAUDE_PROMPT}")"
   if printf '%s\n' "${claude_help}" | grep -q -- '--print'; then
     claude_args=(--print)
+    claude_prompt_bytes="$(wc -c < "${CLAUDE_PROMPT}")"
 
     if printf '%s\n' "${claude_help}" | grep -q -- '--no-session-persistence'; then
       claude_args+=(--no-session-persistence)
@@ -409,7 +563,11 @@ MSG
       claude_args+=(--model "${CLAUDE_REVIEW_MODEL}")
     fi
 
-    run_with_retries "claude" "${CLAUDE_OUT}" run_review_command "${CLAUDE_OUT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${CLAUDE_REVIEW_TIMEOUT_SECONDS}" claude "${claude_args[@]}" "$(cat "${CLAUDE_PROMPT}")"
+    if [ "${claude_prompt_bytes}" -gt "${CLAUDE_PROMPT_ARG_MAX_BYTES}" ]; then
+      run_with_retries "claude" "${CLAUDE_OUT}" run_review_command_stdin "${CLAUDE_OUT}" "${CLAUDE_PROMPT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${CLAUDE_REVIEW_TIMEOUT_SECONDS}" claude "${claude_args[@]}"
+    else
+      run_with_retries "claude" "${CLAUDE_OUT}" run_review_command "${CLAUDE_OUT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${CLAUDE_REVIEW_TIMEOUT_SECONDS}" claude "${claude_args[@]}" "$(cat "${CLAUDE_PROMPT}")"
+    fi
   else
     run_with_retries "claude" "${CLAUDE_OUT}" run_review_command_stdin "${CLAUDE_OUT}" "${CLAUDE_PROMPT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${CLAUDE_REVIEW_TIMEOUT_SECONDS}" claude
   fi
@@ -473,14 +631,42 @@ MSG
 
   set +e
   gemini_help="$(gemini --help 2>/dev/null)"
+  gemini_prompt_file="${GEMINI_PROMPT}"
+  gemini_prompt_bytes="$(wc -c < "${GEMINI_PROMPT}")"
+  REVIEWER_PREFLIGHT_DETAILS="$(preflight_details gemini "${gemini_help}" "${GEMINI_PROMPT}")"
+  if [ "${gemini_prompt_bytes}" -gt "${GEMINI_PROMPT_MAX_BYTES}" ]; then
+    gemini_prompt_file="${PROMPT_DIR}/gemini-review-capped-${TIMESTAMP}.md"
+    {
+      echo "# Gemini Review Prompt"
+      echo
+      echo "The original Gemini prompt was ${gemini_prompt_bytes} bytes and exceeded GEMINI_PROMPT_MAX_BYTES=${GEMINI_PROMPT_MAX_BYTES}."
+      echo "The review context below is truncated to avoid Gemini CLI Node/V8 heap exhaustion."
+      echo "If the truncated context is insufficient, return request_changes with the missing context noted."
+      echo
+      python3 - "${GEMINI_PROMPT}" "${GEMINI_PROMPT_MAX_BYTES}" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+limit = int(sys.argv[2])
+sys.stdout.write(path.read_bytes()[:limit].decode("utf-8", errors="ignore"))
+PY
+      echo
+      echo
+      echo "## Truncation Notice"
+      echo
+      echo "Gemini prompt truncated by run-ai-reviews.sh. Required output remains: ## Verdict with approve, approve_with_notes, or request_changes."
+    } > "${gemini_prompt_file}"
+    echo "[review] Gemini prompt capped: ${gemini_prompt_file}"
+  fi
   if printf '%s\n' "${gemini_help}" | grep -q -- '--prompt'; then
-    gemini_prompt_bytes="$(wc -c < "${GEMINI_PROMPT}")"
+    gemini_prompt_bytes="$(wc -c < "${gemini_prompt_file}")"
 
     if [ "${gemini_prompt_bytes}" -gt "${GEMINI_PROMPT_ARG_MAX_BYTES}" ]; then
       gemini_args=(--prompt "Review the Markdown prompt provided on stdin.")
       gemini_stdin_mode=1
     else
-      gemini_args=(--prompt "$(cat "${GEMINI_PROMPT}")")
+      gemini_args=(--prompt "$(cat "${gemini_prompt_file}")")
       gemini_stdin_mode=0
     fi
 
@@ -501,12 +687,12 @@ MSG
     fi
 
     if [ "${gemini_stdin_mode}" -eq 1 ]; then
-      run_with_retries "gemini" "${GEMINI_OUT}" run_review_command_stdin "${GEMINI_OUT}" "${GEMINI_PROMPT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${GEMINI_REVIEW_TIMEOUT_SECONDS}" gemini "${gemini_args[@]}"
+      run_with_retries "gemini" "${GEMINI_OUT}" run_review_command_stdin "${GEMINI_OUT}" "${gemini_prompt_file}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${GEMINI_REVIEW_TIMEOUT_SECONDS}" gemini "${gemini_args[@]}"
     else
       run_with_retries "gemini" "${GEMINI_OUT}" run_review_command "${GEMINI_OUT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${GEMINI_REVIEW_TIMEOUT_SECONDS}" gemini "${gemini_args[@]}"
     fi
   else
-    run_with_retries "gemini" "${GEMINI_OUT}" run_review_command_stdin "${GEMINI_OUT}" "${GEMINI_PROMPT}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${GEMINI_REVIEW_TIMEOUT_SECONDS}" gemini
+    run_with_retries "gemini" "${GEMINI_OUT}" run_review_command_stdin "${GEMINI_OUT}" "${gemini_prompt_file}" timeout -k "${REVIEW_TIMEOUT_KILL_AFTER_SECONDS}" "${GEMINI_REVIEW_TIMEOUT_SECONDS}" gemini
   fi
   status=$?
   set -e
@@ -664,6 +850,13 @@ You are running as a Codex/GPT fallback reviewer because ${disabled_reviewer} is
 
 This is a degraded fallback review. Do not claim to be an independent external Claude or Gemini reviewer.
 
+You are running in the repository root with read-only filesystem access. The
+embedded review context may be bounded or truncated for prompt-size safety.
+When it is insufficient, inspect the referenced files directly with read-only
+commands such as rg, sed, git diff, git diff --cached, git status, and git show.
+Do not request changes solely because the embedded context is truncated if the
+missing evidence is available from the repository.
+
 Focus:
 ${focus}
 
@@ -696,11 +889,11 @@ ${reason}
 
 MSG
 
-  if [ -f "${CONTEXT_FILE}" ]; then
-    cat "${CONTEXT_FILE}" >> "${prompt_file}"
+  if [ -f "${CODEX_FALLBACK_CONTEXT_FILE}" ]; then
+    cat "${CODEX_FALLBACK_CONTEXT_FILE}" >> "${prompt_file}"
   else
     cat >> "${prompt_file}" <<MSG
-Review context file is unavailable: ${CONTEXT_FILE}
+Review context file is unavailable: ${CODEX_FALLBACK_CONTEXT_FILE}
 MSG
   fi
 }
@@ -848,5 +1041,7 @@ Generated at: $(date -Iseconds)
 A reviewer failure does not fail this script. Failures are captured in the corresponding result file.
 SUMMARY
 
+write_run_manifest
+echo "[review] run manifest: ${MANIFEST_OUT}"
 echo "[review] summary: ${SUMMARY_OUT}"
 echo "[review] done"

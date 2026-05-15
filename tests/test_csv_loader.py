@@ -295,14 +295,86 @@ def test_backtest_csv_cli_accepts_phase2_parameter_overrides(tmp_path):
             "0.02",
             "--hard-stop",
             "-0.02",
+            "--fee-rate",
+            "0.00030",
+            "--slippage-rate",
+            "0.00100",
+            "--hold-overnight",
+            "--capital-mode",
+            "shared-slot",
+            "--max-open-positions",
+            "3",
+            "--variable-slot-count",
+            "--slot-capital-cap",
+            "10000000",
+            "--weekly-contribution",
+            "100000",
+            "--max-daily-stop-losses",
+            "2",
+            "--max-daily-loss",
+            "10000",
+            "--day-end-exit-time",
+            "15:15",
+            "--max-holding-minutes",
+            "30",
             "--pullback-band",
             "0.004",
             "--min-bid-ask-ratio",
             "1.5",
+            "--strategy",
+            "vwap",
+            "--entry-start",
+            "10:30",
+            "--entry-end",
+            "14:30",
+            "--entry-mode",
+            "breakout",
+            "--require-above-vwap",
+            "--impulse-threshold",
+            "0.02",
+            "--min-impulse-volume",
+            "10000",
+            "--impulse-volume-window",
+            "20",
+            "--impulse-volume-multiple",
+            "3.0",
+            "--swing-sma-window",
+            "20",
+            "--swing-volume-window",
+            "5",
+            "--swing-support-band",
+            "0.02",
+            "--swing-max-volume-ratio",
+            "0.5",
+            "--swing-max-rsi",
+            "40",
+            "--swing-min-sma-distance",
+            "0.01",
+            "--swing-min-volume-ratio",
+            "1.0",
+            "--swing-min-rsi",
+            "55",
+            "--min-relative-strength",
+            "0.05",
+            "--aday-sma-window",
+            "20",
+            "--aday-atr-window",
+            "14",
+            "--aday-value-window",
+            "5",
+            "--aday-min-average-value",
+            "50000000000",
+            "--aday-min-atr-ratio",
+            "0.03",
+            "--aday-max-opening-gap",
+            "0.05",
+            "--aday-min-session-value",
+            "100000000",
             "--intrabar-policy",
             "conservative",
             "--ambiguous-intrabar-policy",
             "stop-first",
+            "--skip-db",
             "--output-dir",
             str(output_dir),
         ]
@@ -312,8 +384,45 @@ def test_backtest_csv_cli_accepts_phase2_parameter_overrides(tmp_path):
     assert exit_code == 0
     assert report["phase2_parameters"]["profit_target"] == "0.02"
     assert report["phase2_parameters"]["hard_stop"] == "-0.02"
+    assert report["phase2_parameters"]["fee_rate"] == "0.00030"
+    assert report["phase2_parameters"]["slippage_rate"] == "0.00100"
+    assert report["phase2_parameters"]["day_end_exit"] is False
+    assert report["phase2_parameters"]["capital_mode"] == "shared-slot"
+    assert report["phase2_parameters"]["max_open_positions"] == 3
+    assert report["phase2_parameters"]["variable_slot_count"] is True
+    assert report["phase2_parameters"]["slot_capital_cap"] == "10000000"
+    assert report["phase2_parameters"]["weekly_contribution"] == "100000"
+    assert report["phase2_parameters"]["max_daily_stop_losses"] == 2
+    assert report["phase2_parameters"]["max_daily_loss"] == "10000"
+    assert report["phase2_parameters"]["day_end_exit_time"] == "15:15"
+    assert report["phase2_parameters"]["max_holding_minutes"] == 30
+    assert report["phase2_parameters"]["strategy"] == "vwap"
     assert report["phase2_parameters"]["pullback_band"] == "0.004"
     assert report["phase2_parameters"]["min_bid_ask_ratio"] == "1.5"
+    assert report["phase2_parameters"]["entry_start"] == "10:30"
+    assert report["phase2_parameters"]["entry_end"] == "14:30"
+    assert report["phase2_parameters"]["entry_mode"] == "breakout"
+    assert report["phase2_parameters"]["require_above_vwap"] is True
+    assert report["phase2_parameters"]["impulse_threshold"] == "0.02"
+    assert report["phase2_parameters"]["min_impulse_volume"] == 10000
+    assert report["phase2_parameters"]["impulse_volume_window"] == 20
+    assert report["phase2_parameters"]["impulse_volume_multiple"] == "3.0"
+    assert report["phase2_parameters"]["swing_sma_window"] == 20
+    assert report["phase2_parameters"]["swing_volume_window"] == 5
+    assert report["phase2_parameters"]["swing_support_band"] == "0.02"
+    assert report["phase2_parameters"]["swing_max_volume_ratio"] == "0.5"
+    assert report["phase2_parameters"]["swing_max_rsi"] == "40"
+    assert report["phase2_parameters"]["swing_min_sma_distance"] == "0.01"
+    assert report["phase2_parameters"]["swing_min_volume_ratio"] == "1.0"
+    assert report["phase2_parameters"]["swing_min_rsi"] == "55"
+    assert report["phase2_parameters"]["min_relative_strength"] == "0.05"
+    assert report["phase2_parameters"]["aday_sma_window"] == 20
+    assert report["phase2_parameters"]["aday_atr_window"] == 14
+    assert report["phase2_parameters"]["aday_value_window"] == 5
+    assert report["phase2_parameters"]["aday_min_average_value"] == "50000000000"
+    assert report["phase2_parameters"]["aday_min_atr_ratio"] == "0.03"
+    assert report["phase2_parameters"]["aday_max_opening_gap"] == "0.05"
+    assert report["phase2_parameters"]["aday_min_session_value"] == "100000000"
     assert report["phase2_parameters"]["intrabar_policy"] == "conservative"
     assert report["phase2_parameters"]["ambiguous_intrabar_policy"] == "stop-first"
 

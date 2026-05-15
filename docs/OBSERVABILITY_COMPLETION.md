@@ -15,6 +15,9 @@ Clarify these before implementing observability work:
 - metrics, traces, audit events, or error reporting tools already in use
 - user-visible and operator-visible error handling requirements
 - incident diagnosis questions the system should answer
+- whether dry-run/field-test anomaly handling should use
+  `docs/INCIDENT_OPS.md`
+- heartbeat, quiet, and active-incident status reporting intervals
 - what must never be logged or exported
 
 ## Workflow Additions
@@ -27,7 +30,10 @@ When observability is in scope, add these steps to the project workflow:
    leaking secrets or personal data
 4. cover expected error paths with useful, non-sensitive messages
 5. verify observability output with a local smoke check when practical
-6. include the relevant log, health, metric, trace, or audit evidence in the
+6. for dry-run/field-test monitoring, write incident logs with action class,
+   decision, pre/post evidence, next approval boundary, and periodic status
+   report cadence
+7. include the relevant log, health, metric, trace, incident, or audit evidence in the
    completion report
 
 ## Verification Patterns

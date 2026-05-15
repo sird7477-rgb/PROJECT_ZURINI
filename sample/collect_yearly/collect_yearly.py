@@ -45,6 +45,8 @@ class CollectionConfig:
     end_date: str | None
     collect_stocks: bool
     collect_indices: bool
+    collect_daily_stocks: bool
+    collect_daily_indices: bool
     collect_metadata: bool
     index_codes: dict[str, str]
     fail_fast: bool
@@ -67,6 +69,18 @@ def parse_args(argv: list[str] | None = None) -> CollectionConfig:
     parser.add_argument("--end-date", help="inclusive end date, YYYYMMDD")
     parser.add_argument("--stocks", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--indices", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--daily-stocks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also collect daily stock OHLCV bars into daily-bars/",
+    )
+    parser.add_argument(
+        "--daily-indices",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also collect daily index OHLCV bars into daily-index-bars/",
+    )
     parser.add_argument("--metadata", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--index-code",
@@ -98,6 +112,8 @@ def parse_args(argv: list[str] | None = None) -> CollectionConfig:
         end_date=args.end_date,
         collect_stocks=args.stocks,
         collect_indices=args.indices,
+        collect_daily_stocks=args.daily_stocks,
+        collect_daily_indices=args.daily_indices,
         collect_metadata=args.metadata,
         index_codes=index_codes,
         fail_fast=args.fail_fast,
@@ -229,13 +245,19 @@ class CybosSession:
         return rows
 
     def fetch_minute_bars(self, code: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        return self.fetch_bars(code, start_date, end_date, ord("m"))
+
+    def fetch_daily_bars(self, code: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        return self.fetch_bars(code, start_date, end_date, ord("D"))
+
+    def fetch_bars(self, code: str, start_date: str, end_date: str, chart_kind: int) -> list[dict[str, Any]]:
         chart = self.stock_chart
         chart.SetInputValue(0, code)
         chart.SetInputValue(1, ord("1"))
         chart.SetInputValue(2, end_date)
         chart.SetInputValue(3, start_date)
         chart.SetInputValue(5, [0, 1, 2, 3, 4, 5, 8])
-        chart.SetInputValue(6, ord("m"))
+        chart.SetInputValue(6, chart_kind)
         chart.SetInputValue(9, ord("1"))
 
         rows: list[dict[str, Any]] = []
@@ -282,7 +304,8 @@ def run(config: CollectionConfig) -> int:
     manifest_file = manifest_path(config.output_dir, run_id)
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
-    stock_codes = session.stock_codes() if config.collect_stocks or config.collect_metadata else []
+    needs_stock_codes = config.collect_stocks or config.collect_daily_stocks or config.collect_metadata
+    stock_codes = session.stock_codes() if needs_stock_codes else []
     if config.collect_metadata:
         write_csv(metadata_path(config.output_dir, run_id), SYMBOL_COLUMNS, session.metadata_rows(stock_codes))
 
@@ -302,6 +325,19 @@ def run(config: CollectionConfig) -> int:
                 category="index-bars",
                 period=period,
                 codes=list(config.index_codes),
+                bar_kind="minute",
+                fail_fast=config.fail_fast,
+                sleep_on_error=config.sleep_on_error,
+                manifest_file=manifest_file,
+            )
+        if config.collect_daily_indices:
+            collect_bars_for_codes(
+                session=session,
+                root=config.output_dir,
+                category="daily-index-bars",
+                period=period,
+                codes=list(config.index_codes),
+                bar_kind="daily",
                 fail_fast=config.fail_fast,
                 sleep_on_error=config.sleep_on_error,
                 manifest_file=manifest_file,
@@ -313,6 +349,19 @@ def run(config: CollectionConfig) -> int:
                 category="minute-bars",
                 period=period,
                 codes=stock_codes,
+                bar_kind="minute",
+                fail_fast=config.fail_fast,
+                sleep_on_error=config.sleep_on_error,
+                manifest_file=manifest_file,
+            )
+        if config.collect_daily_stocks:
+            collect_bars_for_codes(
+                session=session,
+                root=config.output_dir,
+                category="daily-bars",
+                period=period,
+                codes=stock_codes,
+                bar_kind="daily",
                 fail_fast=config.fail_fast,
                 sleep_on_error=config.sleep_on_error,
                 manifest_file=manifest_file,
@@ -329,20 +378,24 @@ def collect_bars_for_codes(
     category: str,
     period: Period,
     codes: list[str],
+    bar_kind: str,
     fail_fast: bool,
     sleep_on_error: float,
     manifest_file: Path,
 ) -> None:
     for index, code in enumerate(codes, start=1):
         path = output_path(root, category, period, code)
-        name = session.code_name(code) if category == "minute-bars" else code
+        name = session.code_name(code) if category in {"minute-bars", "daily-bars"} else code
         if path.exists():
             append_manifest(manifest_file, category, code, period, path, "skipped", 0, "exists")
             continue
 
         print(f"  [{category}] {index}/{len(codes)} {name}({code})", end="\r")
         try:
-            rows = session.fetch_minute_bars(code, period.start, period.end)
+            if bar_kind == "daily":
+                rows = session.fetch_daily_bars(code, period.start, period.end)
+            else:
+                rows = session.fetch_minute_bars(code, period.start, period.end)
             write_csv(path, BAR_COLUMNS, rows)
             append_manifest(manifest_file, category, code, period, path, "ok", len(rows), "")
         except Exception as exc:

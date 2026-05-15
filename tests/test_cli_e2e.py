@@ -33,6 +33,38 @@ def test_phase1_cli_loads_db_runs_backtest_and_writes_reports(tmp_path):
     )
 
 
+def test_backtest_csv_cli_records_capital_sizing_overrides(tmp_path):
+    output_dir = tmp_path / "csv-report"
+    sample_csv = tmp_path / "A123456.csv"
+    sample_csv.write_text(
+        "date,time,open,high,low,close,volume\n"
+        "20250401,901,100,100,100,100,4000\n"
+        "20250401,902,104,104,104,104,1000\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "backtest-csv",
+            "--path",
+            str(sample_csv),
+            "--start-equity",
+            "1000000",
+            "--quantity-step",
+            "1",
+            "--skip-db",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert payload["phase2_parameters"]["start_equity"] == "1000000"
+    assert payload["phase2_parameters"]["quantity_step"] == "1"
+    assert payload["phase2_parameters"]["execution_path"] == "memory"
+
+
 def test_phase15_large_dummy_rehearsal_cli_writes_profile_report(tmp_path):
     output_dir = tmp_path / "phase15-report"
 

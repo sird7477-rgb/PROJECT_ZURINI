@@ -6,10 +6,21 @@ This file is the current working baseline for strategy discussions. The archived
 Phase 1 and 1.5 proved framework behavior only. They do not prove strategy
 profitability.
 
+As of 2026-05-10, phase-2 strategy validation has been reset to start from a
+small fixed candidate set before further performance runs are treated as
+decision evidence. Use
+[`strategy-candidate-reset.md`](strategy-candidate-reset.md) as the controlling
+strategy-validation order and
+[`strategy-validation-plan.md`](strategy-validation-plan.md) as the execution
+plan. Earlier backtest results remain reference evidence only and must be rerun
+under the reset process before promotion.
+
 ## Initial Decision Rules
 
 - Use `(old)/` trading conditions, sequence, risk controls, and architecture as
   the first source when implementing a strategy rule.
+- Define the candidate strategy family before deriving parameters, data needs,
+  or performance-test commands.
 - If old files conflict, prefer the newest saved file unless implementation
   evidence strongly supports a different interpretation.
 - Record any AI-chosen exception in current docs before coding it.

@@ -1,10 +1,13 @@
 .env
 .venv/
 data/raw/
+data/derived/
 reports/
+sample/스크린샷*.png
 __pycache__/
 .pytest_cache/
 *.py[cod]
 *.egg-info/
 .coverage
 htmlcov/
+.omx/state/kis-auth-cooldown.json

@@ -64,6 +64,16 @@ def _write_trades_csv(path: Path, trades: list[Trade]) -> None:
         "reason",
         "ambiguous_intrabar",
         "execution_note",
+        "strategy_id",
+        "strategy_group",
+        "entry_rule",
+        "exit_rule",
+        "slot_id",
+        "cost_model",
+        "applied_profit_target",
+        "applied_hard_stop",
+        "applied_max_holding_minutes",
+        "applied_day_end_exit",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -86,6 +96,7 @@ def _write_summary_txt(
         f"trade_count: {report.trade_count}",
         f"gross_pnl: {report.gross_pnl}",
         f"net_pnl: {report.net_pnl}",
+        f"external_contributions: {report.external_contributions}",
         f"max_drawdown: {report.max_drawdown}",
         f"start_equity: {report.start_equity}",
         f"end_equity: {report.end_equity}",

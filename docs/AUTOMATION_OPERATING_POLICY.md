@@ -33,6 +33,30 @@ De-escalate one level only when all are true:
 - the completion report explicitly states that `review-gate` was intentionally
   skipped under the project's review-intensity policy
 
+## Advisory Reviewer Sessions
+
+External reviewers may be kept open during local development only as an
+advisory optimization. This is useful for repeated small iterations where a
+human or agent wants fast feedback before the final gate.
+
+Rules:
+
+- Treat warm reviewer sessions as advisory only, not as commit-candidate
+  approval.
+- Clear the reviewer context before each advisory request when the CLI supports
+  it, for example with `/clear`.
+- Send a compact prompt or changed-file summary rather than the full review
+  context whenever possible.
+- Save any useful advisory finding in the work notes, diff, or feedback queue;
+  do not rely on hidden reviewer session memory as evidence.
+- Run the normal stateless `./scripts/review-gate.sh` for final commit-candidate
+  judgment whenever the project's review-intensity policy requires it.
+
+The final gate remains stateless because `review-gate` writes review context,
+prompts, manifests, outputs, disabled reviewer state, and summaries as
+reproducible artifacts. A warm session with `/clear` can reduce iteration cost,
+but it does not replace those artifacts.
+
 ## Failure-Pattern Feedback
 
 Record a feedback item when it has reuse value, not for every transient mistake.
@@ -67,6 +91,38 @@ Use:
 Feedback is written to `.omx/feedback/queue.jsonl`. `.omx/` is ignored by git,
 so raw project feedback stays local by default.
 
+When a feedback item has been handled, mark it instead of deleting it:
+
+```bash
+./scripts/resolve-feedback.sh \
+  --repeat-key git:index-lock-permission \
+  --note "Template guidance updated"
+```
+
+Use `status=resolved` for accepted and completed work, `ignored` for items that
+were reviewed and intentionally rejected, and `deferred` when the item remains
+valid but is not in the current implementation scope. Missing status on older
+queue entries is treated as `open`.
+
+## Required Input Fail-Closed Policy
+
+Automation must not treat required operating inputs as optional once a workflow
+claims operational readiness, dry-run validity, promotion readiness, or field
+start evidence. Missing, stale, incomplete, or contract-invalid required inputs
+must stop the operational path before downstream execution.
+
+Fail-closed means:
+
+- return a failing/non-ready status for the operational command
+- preserve the blocking reason in a machine-readable artifact
+- skip dependent execution that would make the output look valid
+- avoid hidden substitutions such as stale cache reuse, narrowed scope, reduced
+  cadence, placeholder defaults, or "restricted mode" unless the command is
+  explicitly analysis-only
+
+Analysis-only runs are allowed for diagnostics and fixtures, but their artifacts
+must not be promoted as operational evidence.
+
 ## Subagent Utilization
 
 The leader owns scope, integration, final verification, and user-facing claims.
@@ -100,6 +156,51 @@ reported as such.
 Prefer role selection and reasoning effort over hardcoded model overrides.
 Inherit the current runtime model unless a concrete, current runtime-supported
 reason exists to override it.
+
+### Hardware-Aware Parallelism
+
+Tune subagent and reviewer parallelism to the local machine, current workload,
+and WSL/tmux health. PROJECT_ZURINI currently runs on a 16 GB RAM Windows/WSL
+personal PC, so the default concurrency budget is intentionally conservative.
+
+Use this operating budget unless the user explicitly approves a heavier run:
+
+| Workload | Default Parallelism | Notes |
+| --- | --- | --- |
+| Simple lookup or documentation edit | solo, or 1 short read-only subagent | Keep the leader on the critical path. |
+| Normal code/test work | solo to 2 concurrent lanes | Use targeted tests before full verification. |
+| Strategy analysis, report scans, or review loops | 1-2 concurrent lanes | Avoid stacking with Docker/Postgres or full review-gate. |
+| Heavy verify/review/Docker work | sequential by default | Run broad checks after the environment is stable. |
+
+Reduce to solo mode and checkpoint immediately when the PC becomes sluggish,
+WSL reports vsock/socket errors, tmux reports `target_not_found`, or Ubuntu
+terminals repeatedly fail to launch. Hardware pressure changes scheduling, not
+the verification requirement.
+
+### Stage Transition Checkpoints
+
+Long-running automation must leave resumable state behind as it moves through
+stages. This applies to Ralph, team, strategy-analysis, data-rehearsal, review,
+and multi-phase implementation loops. The primary purpose is recovery after
+forced session loss: WSL/tmux crashes, terminal closure, PC reboot, context
+compaction, or other interruption where the previous conversation cannot be
+trusted as the only state store.
+
+Record a compact checkpoint at each stage transition:
+
+- current stage, target result, and stop condition
+- completed evidence and verification result
+- pending next action
+- active constraints, safety boundaries, and non-goals
+- changed files or expected write scope
+- reviewer state, degraded trust, blockers, and environment warnings
+- recovery instructions for WSL, tmux, terminal, or PC interruption
+
+Use the narrowest durable surface available: `.omx/context/` for handoffs,
+`.omx/notepad.md` for session notes, project memory for reusable facts, or the
+checkpoint helper when the workflow provides one. Do not defer all state capture
+until final completion. A replacement agent should be able to resume from the
+latest checkpoint without replaying the lost session.
 
 ## Planning And Interview Escalation
 

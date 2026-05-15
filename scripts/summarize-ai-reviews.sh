@@ -76,7 +76,18 @@ extract_verdict() {
   local verdict
   verdict="$(
     awk '
-      BEGIN { in_verdict = 0; in_code = 0 }
+      BEGIN { in_verdict = 0; in_code = 0; bullet_count = 0; bullet_verdict = "" }
+      function valid_verdict(value) {
+        return value == "approve" || value == "approve_with_notes" || value == "request_changes"
+      }
+      function normalize(value) {
+        value = tolower(value)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^`+|`+$/, "", value)
+        gsub(/^\*\*|\*\*$/, "", value)
+        gsub(/[^a-z_]/, "", value)
+        return value
+      }
       /^```/ {
         in_code = !in_code
         next
@@ -92,16 +103,25 @@ extract_verdict() {
           next
         }
         if ($0 ~ /^[[:space:]]*([-*+]|\(?[0-9]+[.)])([[:space:]]|$)/) {
+          bullet = $0
+          sub(/^[[:space:]]*([-*+]|\(?[0-9]+[.)])[[:space:]]+/, "", bullet)
+          bullet = normalize(bullet)
+          if (valid_verdict(bullet)) {
+            bullet_count += 1
+            bullet_verdict = bullet
+          }
           next
         }
-        verdict = tolower($0)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", verdict)
-        gsub(/^`+|`+$/, "", verdict)
-        gsub(/^\*\*|\*\*$/, "", verdict)
-        gsub(/[^a-z_]/, "", verdict)
-        if (verdict == "approve" || verdict == "approve_with_notes" || verdict == "request_changes") {
+        verdict = normalize($0)
+        if (valid_verdict(verdict)) {
+          printed = 1
           print verdict
           exit
+        }
+      }
+      END {
+        if (!printed && bullet_count == 1 && bullet_verdict != "") {
+          print bullet_verdict
         }
       }
     ' "${file}"

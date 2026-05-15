@@ -24,6 +24,13 @@ class SignalIntent:
     action: str
     weight: Decimal = Decimal("0")
     reason: str = ""
+    score: Decimal = Decimal("0")
+    profit_target: Decimal | None = None
+    hard_stop: Decimal | None = None
+    max_holding_minutes: int | None = None
+    day_end_exit: bool | None = None
+    group: str = ""
+    strategy_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,16 @@ class Trade:
     reason: str
     ambiguous_intrabar: bool = False
     execution_note: str = ""
+    strategy_id: str = ""
+    strategy_group: str = ""
+    entry_rule: str = ""
+    exit_rule: str = ""
+    slot_id: str = ""
+    cost_model: str = ""
+    applied_profit_target: Decimal | None = None
+    applied_hard_stop: Decimal | None = None
+    applied_max_holding_minutes: int | None = None
+    applied_day_end_exit: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -49,3 +66,4 @@ class BacktestReport:
     max_drawdown: Decimal
     start_equity: Decimal
     end_equity: Decimal
+    external_contributions: Decimal = Decimal("0")

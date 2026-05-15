@@ -103,6 +103,33 @@ API 연결은 `docs/api-smoke-tests.md`의 순서로 별도 smoke test에서만 
 9. 리뷰어가 제한되면 degraded 상태와 누락 리뷰어를 보고한다.
 10. 검증과 review gate 증거가 있을 때만 커밋/푸시한다.
 
+## 필수 운영 입력 원칙
+
+운영형 명령은 best-effort로 계속 진행하지 않는다. 필수 운영 입력이 누락,
+stale, incomplete, contract-invalid 중 하나라도 해당하면 해당 입력을 먼저
+수집하거나 재생성하거나 거부해야 한다.
+
+이 원칙은 특정 데이터 하나에만 한정하지 않는다. 시장 데이터 리포트, API
+payload 리포트, timestamp freshness, schema contract, universe source history,
+활성화된 blacklist/news/risk-defense 입력, 향후 추가되는 readiness signal에
+모두 적용한다.
+
+운영 명령의 기본 동작은 fail-closed다.
+
+- downstream universe selection, scenario execution, field monitoring을 실행하지
+  않는다.
+- status artifact에 차단 사유와 입력 flag를 기록한다.
+- non-zero status를 반환한다.
+- stale snapshot, cached artifact, default value, 제한된 symbol set, 느린 cadence로
+  조용히 대체하지 않는다.
+
+예외적으로 analysis-only 명령은 좁은 fixture나 낮은 threshold를 사용할 수 있다.
+단, 산출물은 운영 readiness, dry-run 성공, field-start 승인 근거로 표시하면
+안 된다.
+
+field universe selection의 source readiness는 기본적으로 60 prior trading days를
+요구한다. test fixture 또는 analysis-only 명령에서만 명시적으로 낮출 수 있다.
+
 ## 1차 개발 완료 기준
 
 Ralph 또는 자동 실행 루프가 1차 개발을 완료했다고 말하려면 다음 증거가
@@ -212,6 +239,34 @@ Ralph 또는 자동 실행 루프가 1차 개발을 완료했다고 말하려면
 템플릿은 참고 원본으로만 사용하고, PROJECT_ZURINI의 `AGENTS.md`,
 `docs/WORKFLOW.md`, `scripts/verify.sh`는 프로젝트 지침을 우선한다.
 
+## 플랜 문서 인덱스 원칙
+
+여러 문서에 걸친 계획은 반드시 현재 인덱스 문서를 기준으로 추적한다.
+인덱스 문서는 현재 상태, 즉시 다음 작업, 주말/후속 작업 큐, 승격/폴백
+게이트, 세부 계약 문서 링크를 한곳에 모은다.
+
+플랜을 추가하거나 나눌 때는:
+
+1. 인덱스를 먼저 만들거나 같은 변경에서 갱신한다.
+2. 상세 매트릭스, readiness 계약, runbook은 별도 문서에 두고 인덱스에서
+   링크한다.
+3. 같은 기준을 여러 플랜 문서에 장문으로 중복하지 않는다.
+4. 사용자가 “플랜이 어디 저장됐는지” 물으면 인덱스를 먼저 답하고, 필요한
+   세부 문서를 이어서 안내한다.
+5. 현재 Plan A 인덱스는 `docs/plan-a-next-actions.md`다.
+
+Ralph, team, review-gate, 전략 분석, 데이터 리허설, dry-run, 다단계 자동화
+작업이 끝나거나 체크포인트를 남길 때는 현재 인덱스를 반드시 대조한다.
+
+1. 완료 항목, 차단 사유, 검증 결과, review-gate 상태, 즉시 다음 작업,
+   승격/폴백 게이트, 운영 입력 상태가 바뀌었는지 확인한다.
+2. 바뀐 항목이 있으면 최종 보고 전에 같은 변경에서 인덱스를 갱신한다.
+3. 바뀐 항목이 없으면 체크포인트나 최종 보고에 “인덱스 변경 없음”과
+   근거를 남긴다.
+4. 체크포인트는 복구 증거일 뿐이며 TODO/source-of-truth를 대체하지 않는다.
+5. 이런 workflow의 최종 보고에는 인덱스를 갱신했는지, 변경 없음인지,
+   해당 없음인지 반드시 적는다.
+
 병합 순서:
 
 1. 현재 프로젝트 루트와 git 상태를 확인한다.
@@ -224,11 +279,30 @@ Ralph 또는 자동 실행 루프가 1차 개발을 완료했다고 말하려면
 7. `./scripts/automation-doctor.sh`, `./scripts/verify.sh`, 필요 시
    `./scripts/review-gate.sh`로 검증한다.
 
+데이터 손실 방지 규칙:
+
+- AI_AUTO 템플릿 갱신, 자동화 doctor, review-gate, archive 작업은
+  `data/raw/`, `data/derived/`, `reports/dry-run/`, `.omx/state/`,
+  `sample/collect_yearly/`, 로컬 DB/운영 증거 파일을 삭제하거나 덮어쓰면 안 된다.
+- `git clean`, `rm -rf`, 템플릿 전체 복사, 디렉터리 재생성 방식의 갱신은 금지한다.
+- retention/cleanup은 먼저 preview 또는 archive 모드로 실행한다. 실제 행/파일 삭제는
+  별도 확인 플래그가 있는 명령만 허용한다.
+- `scripts/build-daily-bars-from-minute.py --retention-trading-days`는 기존
+  daily-bar 행/파일을 제거할 수 있으므로 `--confirm-retention-data-loss` 없이는
+  삭제성 retention을 거부한다.
+- `scripts/archive-omx-artifacts.sh --delete`는 review artifact라도
+  `--confirm-delete` 없이는 거부한다. 일반 AI_AUTO 갱신에서는 archive 모드만 사용한다.
+
 현재 유지하는 reusable 자동화 문서:
 
+- `docs/AI_AUTO_PATCH_MANIFEST.md`
 - `docs/AUTOMATION_OPERATING_POLICY.md`
 - `docs/AI_MODEL_ROUTING.md`
 - `docs/SESSION_QUALITY_PLAN.md`
+- `docs/DOMAIN_PACKS.md`
+- `docs/DOMAIN_PACK_AUTHORING_GUIDE.md`
+- `docs/INTERVIEW_PLAN_LAYER.md`
+- `docs/INCIDENT_OPS.md`
 - `docs/DATA_COMPLETION.md`
 - `docs/SECURITY_COMPLETION.md`
 - `docs/DEPLOYMENT_COMPLETION.md`

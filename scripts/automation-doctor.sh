@@ -3,6 +3,7 @@ set -euo pipefail
 
 FIX=0
 SKIP_DIRTY_CHECK="${DOCTOR_SKIP_DIRTY_CHECK:-0}"
+OMX_ARTIFACT_WARN_COUNT="${OMX_ARTIFACT_WARN_COUNT:-200}"
 
 usage() {
   cat <<'USAGE'
@@ -16,6 +17,7 @@ With --fix, the doctor may apply safe non-overwriting automation setup fixes.
 
 Environment:
   DOCTOR_SKIP_DIRTY_CHECK=1  skip the uncommitted-changes check
+  OMX_ARTIFACT_WARN_COUNT=N   warn when a .omx artifact directory has more than N files
 USAGE
 }
 
@@ -59,7 +61,7 @@ if [ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ]; then
   HOME_READY=1
 fi
 
-if [ -d "${TEMPLATE_DIR}" ] && [ -x "${ROOT}/tools/ai-auto-init" ] && [ -x "${ROOT}/tools/workspace-scan" ]; then
+if [ -d "${TEMPLATE_DIR}" ] && [ -x "${ROOT}/tools/ai-auto-init" ] && [ -x "${ROOT}/tools/ai-home" ] && [ -x "${ROOT}/tools/ai-register" ] && [ -x "${ROOT}/tools/ai-auto-template-status" ] && [ -x "${ROOT}/tools/ai-refactor-scan" ] && [ -x "${ROOT}/tools/ai-rebuild-plan" ] && [ -x "${ROOT}/tools/ai-split-plan" ] && [ -x "${ROOT}/tools/ai-split-dry-run" ] && [ -x "${ROOT}/tools/ai-split-apply" ] && [ -x "${ROOT}/tools/ai-plan-status" ] && [ -x "${ROOT}/tools/ai-interview-record" ] && [ -x "${ROOT}/tools/ai-plan-review" ] && [ -x "${ROOT}/tools/ai-plan-export" ] && [ -x "${ROOT}/tools/feedback-collect" ] && [ -x "${ROOT}/tools/workspace-scan" ]; then
   IN_AI_LAB=1
 fi
 
@@ -102,6 +104,13 @@ suggest() {
 
   SUGGESTIONS+=("$suggestion")
 }
+
+case "${OMX_ARTIFACT_WARN_COUNT}" in
+  ''|*[!0-9]*)
+    say_warn "invalid OMX_ARTIFACT_WARN_COUNT='${OMX_ARTIFACT_WARN_COUNT}'; using 200"
+    OMX_ARTIFACT_WARN_COUNT=200
+    ;;
+esac
 
 copy_from_template_if_missing() {
   local path="$1"
@@ -200,6 +209,62 @@ check_command() {
   fi
 }
 
+command_help_supports() {
+  local help_text="$1"
+  local flag="$2"
+
+  printf '%s\n' "$help_text" | grep -q -- "$flag"
+}
+
+check_gemini_cli_capabilities() {
+  local gemini_help
+
+  if ! command -v gemini >/dev/null 2>&1; then
+    return
+  fi
+
+  gemini_help="$(gemini --help 2>/dev/null || true)"
+  if [ -z "$gemini_help" ]; then
+    say_warn "Gemini help output unavailable; non-interactive review mode could not be inspected"
+    suggest "run gemini --help in an interactive terminal"
+    return
+  fi
+
+  if command_help_supports "$gemini_help" "--prompt"; then
+    say_pass "Gemini supports non-interactive prompt mode (--prompt)"
+  else
+    say_warn "Gemini --prompt support not detected; review may fall back to stdin and can be affected by auth prompts"
+    suggest "check Gemini CLI version or use REVIEW_EXECUTION_MODE=external when Gemini hangs"
+  fi
+
+  if command_help_supports "$gemini_help" "--approval-mode"; then
+    say_pass "Gemini supports approval mode control"
+  else
+    say_warn "Gemini approval mode flag not detected; CLI may request interactive approvals"
+  fi
+
+  if command_help_supports "$gemini_help" "--skip-trust"; then
+    say_pass "Gemini supports skip-trust flag"
+  else
+    say_warn "Gemini skip-trust flag not detected; workspace trust prompts may appear"
+  fi
+
+  if command_help_supports "$gemini_help" "--output-format"; then
+    say_pass "Gemini supports text output format control"
+  else
+    say_warn "Gemini output format flag not detected; review parsing may be less predictable"
+  fi
+
+  if command_help_supports "$gemini_help" "--model"; then
+    say_pass "Gemini supports explicit model selection"
+  else
+    say_warn "Gemini --model flag not detected; provider default model will be used"
+  fi
+
+  printf '[doctor] Gemini review timeout default: %s seconds\n' "${GEMINI_REVIEW_TIMEOUT_SECONDS:-${REVIEW_TIMEOUT_SECONDS:-300}}"
+  printf '[doctor] Gemini large prompt stdin threshold: %s bytes\n' "${GEMINI_PROMPT_ARG_MAX_BYTES:-100000}"
+}
+
 check_helper_link() {
   local link_path="$1"
   local target_path="$2"
@@ -286,9 +351,14 @@ ensure_dir "docs"
 ensure_dir "scripts"
 
 REQUIRED_FILES=(
+  "AI_AUTO_TEMPLATE_VERSION"
   "AGENTS.md"
   "docs/AI_MODEL_ROUTING.md"
   "docs/AUTOMATION_OPERATING_POLICY.md"
+  "docs/DOMAIN_PACKS.md"
+  "docs/DOMAIN_PACK_AUTHORING_GUIDE.md"
+  "docs/INTERVIEW_PLAN_LAYER.md"
+  "docs/INCIDENT_OPS.md"
   "docs/DATA_COMPLETION.md"
   "docs/DEPLOYMENT_COMPLETION.md"
   "docs/OBSERVABILITY_COMPLETION.md"
@@ -304,6 +374,7 @@ REQUIRED_FILES=(
   "scripts/make-review-prompts.sh"
   "scripts/record-feedback.sh"
   "scripts/record-project-memory.sh"
+  "scripts/resolve-feedback.sh"
   "scripts/run-ai-reviews.sh"
   "scripts/summarize-ai-reviews.sh"
   "scripts/test-review-summary.sh"
@@ -313,6 +384,10 @@ REQUIRED_FILES=(
 for path in "${REQUIRED_FILES[@]}"; do
   check_required_file "$path"
 done
+
+if [ "${IN_AI_LAB}" -eq 1 ]; then
+  check_required_file "docs/AI_ROLES.md"
+fi
 
 if [ -f "scripts/verify.sh" ]; then
   say_pass "required file exists: scripts/verify.sh"
@@ -349,6 +424,8 @@ fi
 check_command claude warn
 check_command gemini warn
 
+check_gemini_cli_capabilities
+
 echo
 echo "[doctor] checking reviewer state"
 
@@ -359,10 +436,23 @@ if [ -d ".omx/reviewer-state" ]; then
     disabled_count=$((disabled_count + 1))
     reviewer="$(basename "$marker" .disabled)"
     reason="$(sed -n 's/^reason=//p' "$marker" 2>/dev/null | head -n 1)"
+    details="$(sed -n 's/^details=//p' "$marker" 2>/dev/null | head -n 1)"
+    disabled_at="$(sed -n 's/^disabled_at=//p' "$marker" 2>/dev/null | head -n 1)"
+    source_run_id="$(sed -n 's/^source_run_id=//p' "$marker" 2>/dev/null | head -n 1)"
+    next_action="$(sed -n 's/^next_action=//p' "$marker" 2>/dev/null | head -n 1)"
+    reset_hint="$(sed -n 's/^reset_hint=//p' "$marker" 2>/dev/null | head -n 1)"
     if [ -n "$reason" ]; then
       say_warn "reviewer disabled: ${reviewer} (${reason})"
     else
       say_warn "reviewer disabled: ${reviewer}"
+    fi
+    [ -n "$details" ] && printf '       details: %s\n' "$details"
+    [ -n "$disabled_at" ] && printf '       disabled_at: %s\n' "$disabled_at"
+    [ -n "$source_run_id" ] && printf '       source_run_id: %s\n' "$source_run_id"
+    [ -n "$next_action" ] && printf '       next_action: %s\n' "$next_action"
+    if [ -n "$reset_hint" ]; then
+      printf '       reset_hint: %s\n' "$reset_hint"
+      suggest "$reset_hint"
     fi
   done
 
@@ -377,11 +467,71 @@ else
 fi
 
 echo
+echo "[doctor] checking .omx session artifacts"
+
+if [ -d ".omx" ]; then
+  for artifact_dir in \
+    ".omx/review-results" \
+    ".omx/review-context" \
+    ".omx/review-prompts" \
+    ".omx/model-routing" \
+    ".omx/external-review"
+  do
+    if [ ! -d "$artifact_dir" ]; then
+      say_skip "session artifact directory missing: ${artifact_dir}"
+      continue
+    fi
+
+    artifact_count="$(find "$artifact_dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$artifact_count" -gt "$OMX_ARTIFACT_WARN_COUNT" ]; then
+      if [ "$FIX" -eq 1 ] && [ "$artifact_dir" = ".omx/review-results" ] && [ -x "scripts/archive-omx-artifacts.sh" ]; then
+        if OMX_REVIEW_ARCHIVE_THRESHOLD="$OMX_ARTIFACT_WARN_COUNT" ./scripts/archive-omx-artifacts.sh; then
+          say_fix "archived old review artifacts from ${artifact_dir}"
+        else
+          say_warn "review artifact archive failed for ${artifact_dir}"
+          suggest "OMX_REVIEW_ARCHIVE_THRESHOLD=${OMX_ARTIFACT_WARN_COUNT} ./scripts/archive-omx-artifacts.sh --dry-run"
+        fi
+      else
+        say_warn "session artifact directory has ${artifact_count} files: ${artifact_dir}"
+        suggest "./scripts/archive-omx-artifacts.sh --dry-run"
+        suggest "./scripts/automation-doctor.sh --fix"
+      fi
+    else
+      say_pass "session artifact directory size ok: ${artifact_dir} (${artifact_count} files)"
+    fi
+  done
+
+  latest_manifest="$(ls -t .omx/review-results/review-run-*.md 2>/dev/null | head -n 1 || true)"
+  if [ -n "$latest_manifest" ]; then
+    say_pass "latest review run manifest: ${latest_manifest}"
+  else
+    say_skip "no review run manifest recorded yet"
+  fi
+else
+  say_warn ".omx directory is missing"
+  suggest "./scripts/automation-doctor.sh --fix"
+fi
+
+echo
 echo "[doctor] checking ai-lab helper links"
 
 if [ "$IN_AI_LAB" -eq 1 ] && [ -n "$HOME_DIR" ] && [ "$HOME_READY" -eq 1 ]; then
+  check_helper_link "${HOME_DIR}/bin/AI_AUTO" "${ROOT}/tools/ai-home"
   check_helper_link "${HOME_DIR}/bin/ai-auto-init" "${ROOT}/tools/ai-auto-init"
+  check_helper_link "${HOME_DIR}/bin/ai-home" "${ROOT}/tools/ai-home"
   check_helper_link "${HOME_DIR}/bin/aiinit" "${ROOT}/tools/ai-auto-init"
+  check_helper_link "${HOME_DIR}/bin/ai-register" "${ROOT}/tools/ai-register"
+  check_helper_link "${HOME_DIR}/bin/ai-auto-template-status" "${ROOT}/tools/ai-auto-template-status"
+  check_helper_link "${HOME_DIR}/bin/ai-refactor-scan" "${ROOT}/tools/ai-refactor-scan"
+  check_helper_link "${HOME_DIR}/bin/ai-rebuild-plan" "${ROOT}/tools/ai-rebuild-plan"
+  check_helper_link "${HOME_DIR}/bin/ai-split-plan" "${ROOT}/tools/ai-split-plan"
+  check_helper_link "${HOME_DIR}/bin/ai-split-dry-run" "${ROOT}/tools/ai-split-dry-run"
+  check_helper_link "${HOME_DIR}/bin/ai-split-apply" "${ROOT}/tools/ai-split-apply"
+  check_helper_link "${HOME_DIR}/bin/ai-plan-status" "${ROOT}/tools/ai-plan-status"
+  check_helper_link "${HOME_DIR}/bin/ai-interview-record" "${ROOT}/tools/ai-interview-record"
+  check_helper_link "${HOME_DIR}/bin/ai-plan-review" "${ROOT}/tools/ai-plan-review"
+  check_helper_link "${HOME_DIR}/bin/ai-plan-export" "${ROOT}/tools/ai-plan-export"
+  check_helper_link "${HOME_DIR}/bin/feedback-collect" "${ROOT}/tools/feedback-collect"
   check_helper_link "${HOME_DIR}/bin/workspace-scan" "${ROOT}/tools/workspace-scan"
   case ":${PATH}:" in
     *":${HOME_DIR}/bin:"*)

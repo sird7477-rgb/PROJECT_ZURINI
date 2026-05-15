@@ -75,6 +75,7 @@ Use three layers:
 |---|---|---|
 | Project memory | `.omx/project-memory.json` | durable cross-session decisions and user preferences |
 | Current state | `docs/CURRENT_STATE.md` | human-readable repo status and known issues |
+| Session checkpoint | `.omx/state/session-checkpoint.md` | active plan progress, current step, and continue/escalate decision |
 | Run artifacts | `.omx/review-results/review-run-*.md` | per-run evidence and links |
 
 Record a memory item when one of these happens:
@@ -120,6 +121,7 @@ Recommended checkpoints:
 - after each commit or push
 - after each completed review-gate run
 - after a major plan changes
+- after a plan step completes or a search axis fails and the next axis is chosen
 - before switching domains, for example generic automation to phase-2 data
   validation
 - when the conversation becomes long enough that recent context may crowd out
@@ -128,14 +130,36 @@ Recommended checkpoints:
 Checkpoint content:
 
 - current objective
+- active plan file
+- current plan step
+- completed steps
+- next step or next search axis
 - changed files
 - completed decisions
 - pending decisions
+- continue-or-escalate decision and reason
+- resource profile and parallelism notes
 - latest verification evidence
 - reviewer state
 - model routing snapshot
 - leader/delegated lane ownership and any degraded fallback coverage
 - known warnings and blockers
+
+Autonomous continuation rule:
+
+- A failed attempt, empty search result, or "no valid candidate found" checkpoint
+  is not a stop condition by itself when the user already delegated the
+  objective, boundaries, and decision principles.
+- Treat that checkpoint as a pivot point: record the failed axis, choose the
+  next reasonable axis, and continue inside the delegated scope.
+- Escalate to the user only when the next axis requires a new business
+  decision, exceeds the delegated scope, creates destructive/credentialed or
+  production risk, hits a configured time/cost/resource limit, or the reasonable
+  search space has been exhausted.
+- In resource-constrained sessions, such as a host that has previously forced
+  Ubuntu/WSL shutdowns or while another heavy review is running, lower
+  parallelism before continuing and record that resource profile in the
+  checkpoint.
 
 Quality drift triggers:
 
@@ -171,6 +195,8 @@ Preferred artifacts:
 Avoid repeatedly loading:
 
 - all `.omx/review-results/*`
+- `.omx/review-results/archive/*` unless investigating a specific historical run
+- `.omx/logs/*` unless the current failure requires runtime trace evidence
 - large historical logs
 - old prompt files unless investigating a specific run
 - full provider documentation when local runtime evidence is enough
@@ -183,6 +209,20 @@ For long sessions, prefer:
 - docs/current-state first
 - exact file reads over repo-wide dumps
 
+Checkpoint hygiene:
+
+- `.omx/state/session-checkpoint.md` should stay a compact resume pointer, not a
+  transcript or raw log sink.
+- `scripts/write-session-checkpoint.sh` caps `git status --short` output with
+  `OMX_SESSION_CHECKPOINT_STATUS_LIMIT` and long field values with
+  `OMX_SESSION_CHECKPOINT_FIELD_LIMIT`.
+- If a checkpoint points to large evidence, read the linked manifest or verdict
+  first, then open only the specific referenced file needed for the current
+  question.
+- Do not use broad `.omx` reads as a default resume step; explicitly exclude
+  archived review artifacts and logs unless they are the target of the
+  investigation.
+
 ## 5. Resume Protocol
 
 Status: active guidance. The agent performs these reads manually today; a
@@ -191,10 +231,11 @@ single resume command is planned.
 On resume or after compaction, the agent should recover from repo-native state:
 
 1. `git status --short`
-2. latest relevant `docs/CURRENT_STATE.md` section
-3. latest `.omx/model-routing/latest.md`
-4. latest review verdict/manifest if a review was in progress
-5. `.omx/project-memory.json` only for durable preferences
+2. `.omx/state/session-checkpoint.md`
+3. latest relevant `docs/CURRENT_STATE.md` section
+4. latest `.omx/model-routing/latest.md`
+5. latest review verdict/manifest if a review was in progress
+6. `.omx/project-memory.json` only for durable preferences
 
 The final answer after a resume must answer the newest user request, not an
 older task that happened to be active before compaction.
@@ -241,4 +282,5 @@ Phase 5, cleanup and retention:
 - keep latest manifests, verdicts, summaries, and referenced reviewer files
   active in `.omx/review-results` (implemented)
 - never auto-delete evidence during normal review or doctor runs; deletion
-  requires explicit `archive-omx-artifacts.sh --delete` (implemented)
+  requires explicit `archive-omx-artifacts.sh --delete --confirm-delete`
+  (implemented)

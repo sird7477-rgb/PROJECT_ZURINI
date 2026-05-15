@@ -156,6 +156,40 @@ The first list is prompt echo; the bare verdict is the actual answer.
 MSG
 }
 
+write_single_bullet_verdict() {
+  local file="$1"
+
+  cat > "${file}" <<'MSG'
+# Review
+
+## Verdict
+
+- approve_with_notes
+
+## Findings
+
+No blocking findings.
+MSG
+}
+
+write_single_bullet_echo_then_valid_verdict() {
+  local file="$1"
+
+  cat > "${file}" <<'MSG'
+# Review
+
+## Verdict
+
+- approve_with_notes
+
+request_changes
+
+## Findings
+
+The first line is echoed prompt context; the bare verdict is the actual answer.
+MSG
+}
+
 write_fenced_prompt_echo_only() {
   local file="$1"
 
@@ -511,6 +545,42 @@ case_prompt_echo_then_real_verdict() {
   assert_summary "prompt_echo_then_real_verdict" "proceed" "multi_reviewer" 0
 }
 
+case_single_bullet_verdict() {
+  local dir="${TMP_ROOT}/single_bullet_verdict"
+  mkdir -p "${dir}"
+
+  write_verdict "${dir}/claude-review-current.md" "approve"
+  write_single_bullet_verdict "${dir}/gemini-review-current.md"
+  write_fallback_summary "${dir}/codex-fallback-summary-current.md" "none"
+  write_run_summary "${dir}" \
+    "${dir}/claude-review-current.md" \
+    "${dir}/gemini-review-current.md" \
+    "${dir}/missing-architect.md" \
+    "${dir}/missing-test.md" \
+    "${dir}/codex-fallback-summary-current.md"
+
+  assert_summary "single_bullet_verdict" "proceed" "multi_reviewer" 0
+}
+
+case_single_bullet_echo_then_valid_verdict() {
+  local dir="${TMP_ROOT}/single_bullet_echo_then_valid_verdict"
+  mkdir -p "${dir}"
+
+  write_skipped "${dir}/claude-review-current.md"
+  write_skipped "${dir}/gemini-review-current.md"
+  write_verdict "${dir}/codex-architect-current.md" "approve"
+  write_single_bullet_echo_then_valid_verdict "${dir}/codex-test-current.md"
+  write_fallback_summary "${dir}/codex-fallback-summary-current.md" "informational_only"
+  write_run_summary "${dir}" \
+    "${dir}/claude-review-current.md" \
+    "${dir}/gemini-review-current.md" \
+    "${dir}/codex-architect-current.md" \
+    "${dir}/codex-test-current.md" \
+    "${dir}/codex-fallback-summary-current.md"
+
+  assert_summary "single_bullet_echo_then_valid_verdict" "revise" "codex_only_degraded" 1 "claude:skipped, gemini:skipped"
+}
+
 case_fenced_prompt_echo_ignored() {
   local dir="${TMP_ROOT}/fenced_prompt_echo_ignored"
   mkdir -p "${dir}"
@@ -542,6 +612,8 @@ case_valid_review_with_fenced_failure_footer
 case_valid_request_changes_with_skipped_word
 case_prompt_echo_choices_do_not_approve
 case_prompt_echo_then_real_verdict
+case_single_bullet_verdict
+case_single_bullet_echo_then_valid_verdict
 case_fenced_prompt_echo_ignored
 
 echo "[summary-test] success"

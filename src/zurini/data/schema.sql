@@ -55,3 +55,61 @@ CREATE TABLE IF NOT EXISTS symbol_metadata (
     source TEXT NOT NULL DEFAULT 'sample',
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS dry_run_sessions (
+    session_id TEXT PRIMARY KEY,
+    trading_date DATE NOT NULL,
+    package_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    order_hard_block BOOLEAN NOT NULL,
+    summary JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT dry_run_sessions_no_order_mode CHECK (mode = 'no-order'),
+    CONSTRAINT dry_run_sessions_order_hard_block CHECK (order_hard_block = true),
+    CONSTRAINT dry_run_sessions_not_broker_ready
+        CHECK (
+            COALESCE(
+                jsonb_typeof(summary -> 'ready_for_broker_or_order_transmission') = 'boolean'
+                AND summary -> 'ready_for_broker_or_order_transmission' = 'false'::jsonb,
+                false
+            )
+        )
+);
+
+CREATE TABLE IF NOT EXISTS dry_run_ledger_events (
+    session_id TEXT NOT NULL REFERENCES dry_run_sessions(session_id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    event_time TIMESTAMPTZ,
+    symbol TEXT NOT NULL DEFAULT '',
+    strategy_group TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, sequence),
+    CONSTRAINT dry_run_ledger_events_sequence_positive CHECK (sequence > 0),
+    CONSTRAINT dry_run_ledger_session_summary_not_broker_ready
+        CHECK (
+            event_type <> 'session-summary'
+            OR (
+                COALESCE(
+                    jsonb_typeof(payload -> 'ready_for_broker_or_order_transmission') = 'boolean'
+                    AND payload -> 'ready_for_broker_or_order_transmission' = 'false'::jsonb,
+                    false
+                )
+            )
+        ),
+    CONSTRAINT dry_run_ledger_virtual_order_hard_block
+        CHECK (
+            event_type <> 'virtual-order'
+            OR (
+                COALESCE(
+                    jsonb_typeof(payload -> 'hard_blocked') = 'boolean'
+                    AND payload -> 'hard_blocked' = 'true'::jsonb,
+                    false
+                )
+            )
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_dry_run_ledger_events_session_type
+    ON dry_run_ledger_events (session_id, event_type, sequence);
