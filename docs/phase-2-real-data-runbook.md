@@ -46,6 +46,150 @@ bars must satisfy a strict session grid, while stock bars are treated as sparse
 trade-event evidence unless the source is proven to emit a fully materialized
 every-minute grid.
 
+## Rolling Two-Year Minute Dataset
+
+The research/backtest dataset should become a rolling two-year minute-bar
+baseline. It is not a live-entry data source and must not widen the no-order
+field monitor during the market session.
+
+Current decision as of 2026-05-16: full legacy CSV-to-Postgres migration is
+deferred because the estimated Postgres footprint can exceed current local disk
+headroom. The code/schema foundation remains analysis-only. Do not run full
+historical bulk import, do not delete legacy source CSVs, and do not make this
+dataset a field-start dependency until a later accepted storage plan and
+integrity gate exist.
+
+Purpose:
+
+- refresh the historical backtest dataset with the newest completed market data;
+- preserve a continuous research timeline across the existing two-year legacy
+  data and newly collected KIS data;
+- support universe recall audit, U30/U50/U80/U100 comparison, day/swing
+  simulation candidates, and market/filter replay after close;
+- keep 장중 field-run monitoring limited to the selected operating universe.
+
+Storage contract:
+
+- store legacy two-year data and newly collected KIS minute data in the same
+  logical time series;
+- add row-level source identifiers such as `source`, `vendor`,
+  `source_run_id`, `import_batch_id`, and `schema_version`;
+- KIS-collected rows must be distinguishable from legacy rows in every report
+  and query path;
+- retain only the latest rolling two-year research window unless an explicit
+  archive task is approved;
+- keep raw source files outside git.
+- preserve raw source CSVs until a future full migration is accepted, verified,
+  and explicitly designated as safe for source-file deletion.
+
+Raw/canonical split:
+
+- raw minute bars preserve source-specific rows and may contain overlapping
+  legacy/KIS rows for the same `symbol + timestamp`;
+- canonical minute bars are the default backtest/research view and expose one
+  selected row per `symbol + timestamp + interval`;
+- when sources overlap, canonical priority is KIS over legacy only if the KIS
+  row is contract-valid; otherwise keep the accepted legacy row and flag the KIS
+  row as degraded in raw evidence;
+- do not silently merge conflicting OHLCV values. Conflicts need an import
+  report with source, timestamp, field, and selected canonical reason.
+
+Legacy-data compatibility:
+
+- required fields are `symbol`, `timestamp`, `open`, `high`, `low`, and
+  `close`; rows missing any required field are rejected;
+- `volume` should be loaded when present; if missing, mark the row degraded for
+  volume-dependent strategies;
+- `value`/`traded_value` may be loaded when present. If computed from
+  `close * volume`, mark it as estimated rather than native source data;
+- fields used by the current field monitor, including `bid_ask_ratio`, `action`,
+  `passed`, `rank`, `reason`, `score`, `strategy_group`, and `input_flags`, are
+  part of the research-minute raw/canonical contract. They may be null for
+  legacy rows and should be populated by field/replay/KIS-derived rows when
+  available;
+- `research_minute_raw` / `research_minute_canonical` are minute-data tables
+  only. `data_origin` is closed to `legacy-minute-backfill` for the historical
+  two-year minute backfill and `field-observation` for intraday field-monitor
+  collection. Both origins must use `interval='1m'`;
+- universe-selection daily rows are stored separately in
+  `universe_daily_raw` / `universe_daily_canonical` with
+  `data_origin='universe-selection-source'` and `trading_date`, not a fake
+  minute timestamp;
+- trade history is stored separately in `trade_runs`, `trade_signals`,
+  `trade_orders`, and `trade_positions`. These tables carry `trade_mode`
+  (`dry_run`, `field_shadow`, `paper`, `live`) and `strategy_group`
+  (`day`, `swing`) so virtual dry-run history, future field/live history, and
+  day/swing strategy evidence cannot be collapsed into one ambiguous ledger;
+- quote/depth fields, order-book pressure, live `observed_at`, freshness report
+  IDs, and KIS payload metadata may be null for legacy rows;
+- nullable fields must never be treated as normal defaults. Strategy/filter
+  replay that depends on a missing field must be marked degraded or excluded.
+
+Index polling storage:
+
+- The current operating contract is 10-second KIS index polling, not 5-second
+  polling.
+- Raw KOSPI/KOSDAQ poll snapshots are stored in `index_ticks` with
+  `price`, KIS session open/high/low fields, `poll_interval_seconds`,
+  `source_run_id`, source/vendor, quality flags, and raw payload metadata.
+- Minute-level trend calculations consume `index_bars`, which is the 1-minute
+  aggregation of observed tick `price`. KIS session high/low fields are retained
+  in `index_ticks` for traceability but are not used as minute-bar high/low.
+
+Recommended quality flags include:
+
+- `value_missing`
+- `value_estimated`
+- `volume_missing`
+- `bid_ask_ratio_missing`
+- `legacy_operating_field_missing`
+- `quote_depth_missing`
+- `observed_at_missing`
+- `corporate_action_unknown`
+- `source_overlap_conflict`
+- `kis_row_degraded`
+
+Cutoff discipline:
+
+- universe construction for date `D` may use only data available through `D-1`;
+- day/swing replay for date `D` may use date `D` minute/quote/depth data only
+  after the simulated decision timestamp;
+- universe recall audit combines the `D-1` universe with the date `D` full
+  research minute dataset to classify missed watch candidates;
+- no report may present rolling research data as field-start promotion evidence
+  unless its source, freshness, continuity, and strategy-specific data contract
+  pass the relevant gates.
+
+Implemented analysis-only command foundations (2026-05-16):
+
+```bash
+.venv/bin/python -m zurini.simulation_analysis_cli research-minute-import \
+  --path sample/research-minute-bars.csv \
+  --source legacy-daishin \
+  --vendor daishin \
+  --source-run-id historical-seed \
+  --import-batch-id research-20260516 \
+  --output reports/phase2/research-minute-import.json
+
+.venv/bin/python -m zurini.simulation_analysis_cli research-minute-retention \
+  --retention-days 730 \
+  --output reports/phase2/research-minute-retention.json
+```
+
+`research-minute-import` inserts raw rows and refreshes canonical selection for
+imported keys. `research-minute-retention` reports or applies rolling-window
+deletes. Both remain analysis-only/no-order workflow components.
+
+Field-start DB hygiene:
+
+- verify Postgres is responsive before field operation;
+- verify no historical bulk import or cleanup query is running;
+- verify `research_minute_*`, `universe_daily_*`, and `index_bars` have no
+  unintended `historical-db-*` partial residue;
+- verify local disk headroom is sufficient;
+- treat historical research-data migration as deferred. This preflight must not
+  trigger bulk import or source CSV deletion during market-session startup.
+
 ## Bar Continuity Policy
 
 Detailed promotion rules live in
@@ -223,6 +367,10 @@ After the intake report is accepted, run a small DB smoke:
 The smoke run proves file parsing, DB insert, DB fetch, strategy wiring, and
 report generation. It also writes `trade_continuity` into `report.json` so
 entry/exit windows can be audited. It is not a profitability verdict.
+
+Historical DB import remains dry-run by default. Use `historical-db-import
+--apply` only for a bounded local DB insert, and keep `--limit-files` present
+until the full storage migration plan is accepted.
 
 For real-data rehearsal beyond smoke size, select a contiguous completed month
 range and a stable common symbol set. Do not mix actively collecting partial

@@ -13,6 +13,7 @@ from zurini.data.large_dummy import (
     iter_large_dummy_market_bars,
 )
 from zurini.dry_run import build_empty_plan_a_dry_run_report, dry_run_ledger_events, persist_dry_run_report
+from zurini.kis_index_feed import KisIndexSample
 
 pytestmark = pytest.mark.integration
 
@@ -29,6 +30,32 @@ def test_schema_loader_and_ordered_date_range_fetch_roundtrip():
     assert fetched[0].symbol == bars[3].symbol
     assert fetched[0].timestamp == bars[3].timestamp
     assert fetched[-1].timestamp == bars[7].timestamp
+
+
+def test_index_ticks_store_ten_second_poll_samples_separately_from_minute_bars():
+    db.reset_index_tables()
+    sample = KisIndexSample(
+        "KOSPI",
+        datetime(2026, 5, 15, 9, 0, 3, tzinfo=ZoneInfo("Asia/Seoul")),
+        price=100,
+        open=99,
+        high=101,
+        low=98,
+        volume=10,
+    )
+
+    assert db.insert_index_ticks([sample], poll_interval_seconds=10, source_run_id="run-1") == 1
+
+    with db._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT index_code, price, session_open, session_high, session_low,
+                   poll_interval_seconds, raw_payload ->> 'source'
+            FROM index_ticks
+            WHERE index_code = 'KOSPI'
+            """
+        ).fetchone()
+    assert row == ("KOSPI", 100, 99, 101, 98, 10, "kis-index-poll-10s")
 
 
 def test_multi_symbol_schema_load_and_fetch_roundtrip():

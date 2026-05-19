@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from http.client import HTTPException
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -360,6 +361,8 @@ class JsonHttpClient:
         except HTTPError as exc:
             body = exc.read().decode("utf-8") if exc.fp else "{}"
             return JsonHttpResponse(exc.code, _safe_json(body))
+        except HTTPException as exc:
+            raise URLError(str(exc)) from exc
 
 
 class KisTokenCache:
@@ -895,14 +898,15 @@ def build_kis_read_only_universe(
     _clear_auth_cooldown(auth_cooldown_path, profile=kis_profile.name)
     flags: list[str] = []
     read_call_count = 1
-    for index, symbol in enumerate(normalized):
-        if quote_interval_seconds and index > 0:
-            time.sleep(quote_interval_seconds)
+    last_read_call_at = call_timestamps[-1] if call_timestamps else None
+    for symbol in normalized:
         depth_response: JsonHttpResponse | None = None
         if include_quote_depth:
             try:
+                last_read_call_at = _sleep_before_kis_read_call(last_read_call_at, quote_interval_seconds)
                 read_call_count += 1
-                call_timestamps.append(datetime.now(timezone.utc))
+                last_read_call_at = datetime.now(timezone.utc)
+                call_timestamps.append(last_read_call_at)
                 response = _kis_inquire_price(env, http, token=token, symbol=symbol, profile=kis_profile)
                 price_observed_at = datetime.now(timezone.utc)
             except (OSError, URLError):
@@ -910,8 +914,10 @@ def build_kis_read_only_universe(
                 members.append(KisUniverseMember(symbol, "", False, "api timeout or network error"))
                 continue
             try:
+                last_read_call_at = _sleep_before_kis_read_call(last_read_call_at, quote_interval_seconds)
                 read_call_count += 1
-                call_timestamps.append(datetime.now(timezone.utc))
+                last_read_call_at = datetime.now(timezone.utc)
+                call_timestamps.append(last_read_call_at)
                 depth_response = _kis_inquire_asking_price_exp_ccn(
                     env,
                     http,
@@ -925,8 +931,10 @@ def build_kis_read_only_universe(
                 depth_observed_at = None
         else:
             try:
+                last_read_call_at = _sleep_before_kis_read_call(last_read_call_at, quote_interval_seconds)
                 read_call_count += 1
-                call_timestamps.append(datetime.now(timezone.utc))
+                last_read_call_at = datetime.now(timezone.utc)
+                call_timestamps.append(last_read_call_at)
                 response = _kis_inquire_price(env, http, token=token, symbol=symbol, profile=kis_profile)
                 price_observed_at = datetime.now(timezone.utc)
             except (OSError, URLError) as exc:
@@ -1045,6 +1053,16 @@ def build_kis_read_only_universe(
         budget_evidence=budget_evidence,
         safety_boundary=safety_boundary,
     )
+
+
+def _sleep_before_kis_read_call(last_call_at: datetime | None, quote_interval_seconds: float) -> datetime | None:
+    if last_call_at is None or quote_interval_seconds <= 0:
+        return last_call_at
+    elapsed_seconds = (datetime.now(timezone.utc) - last_call_at).total_seconds()
+    sleep_seconds = quote_interval_seconds - elapsed_seconds
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
+    return last_call_at
 
 
 def build_kis_daily_bars(

@@ -3,6 +3,7 @@ import io
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from http.client import IncompleteRead
 from urllib.error import URLError
 from zipfile import ZipFile
 from zoneinfo import ZoneInfo
@@ -98,6 +99,19 @@ class FakeUrlopenResponse:
 
     def read(self):
         return b"<html>not json</html>"
+
+
+class FakeIncompleteReadResponse:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        raise IncompleteRead(b"", 1836)
 
 
 def _stock_master_zip(file_name, row):
@@ -2046,6 +2060,55 @@ def test_kis_readonly_universe_counts_timed_out_quote_attempts_in_budget():
     assert payload["budget_evidence"]["measured_read_calls"] == 2
 
 
+def test_kis_readonly_universe_throttles_every_price_and_depth_call(monkeypatch):
+    responses = []
+    for price in ("70000", "120000"):
+        responses.extend(
+            [
+                JsonHttpResponse(
+                    200,
+                    {
+                        "rt_cd": "0",
+                        "output": {
+                            "stck_prpr": price,
+                            "stck_oprc": price,
+                            "stck_hgpr": price,
+                            "stck_lwpr": price,
+                            "acml_vol": "123456",
+                            "acml_tr_pbmn": "8641920000",
+                        },
+                    },
+                ),
+                JsonHttpResponse(
+                    200,
+                    {
+                        "rt_cd": "0",
+                        "output1": {
+                            "total_askp_rsqn": "1000",
+                            "total_bidp_rsqn": "2500",
+                        },
+                    },
+                ),
+            ]
+        )
+    sleeps: list[float] = []
+    monkeypatch.setattr(api_smoke.time, "sleep", sleeps.append)
+
+    result = build_kis_read_only_universe(
+        symbols=("005930", "000660"),
+        environ={"KIS_LIVE_APP_KEY": "kis-key-secret", "KIS_LIVE_APP_SECRET": "kis-secret"},
+        client=FakeKisUniverseClient(responses),
+        endpoint_profile="prod",
+        confirm_prod_readonly=True,
+        include_quote_depth=True,
+        quote_interval_seconds=0.25,
+    )
+
+    assert result.read_call_count == 5
+    assert len(sleeps) == 4
+    assert all(duration > 0 for duration in sleeps)
+
+
 def test_kis_readonly_universe_rejects_negative_quote_interval():
     with pytest.raises(ValueError, match="quote_interval_seconds"):
         build_kis_read_only_universe(symbols=("005930",), environ={}, quote_interval_seconds=-1)
@@ -2330,7 +2393,7 @@ def test_kis_readonly_universe_cli_prod_rate_profile_uses_critical_window_budget
 
     interval = _kis_quote_interval(Namespace(quote_interval_seconds=None, rate_profile="prod", skip_quote_depth=False))
 
-    assert interval == pytest.approx(0.5)
+    assert interval == pytest.approx(0.3)
 
 
 def test_api_smoke_network_skips_missing_env_without_calling_network():
@@ -2358,6 +2421,16 @@ def test_json_http_client_sanitizes_non_json_success_response(monkeypatch):
 
     assert response.status_code == 200
     assert response.payload["error"]["message"] == "<html>not json</html>"
+
+
+def test_json_http_client_normalizes_incomplete_read_as_url_error(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return FakeIncompleteReadResponse()
+
+    monkeypatch.setattr(api_smoke, "urlopen", fake_urlopen)
+
+    with pytest.raises(URLError):
+        JsonHttpClient().get_json("https://example.invalid/smoke")
 
 
 def test_api_smoke_cli_rejects_network_run_without_network_gate(tmp_path):

@@ -4,16 +4,18 @@ from datetime import datetime
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
-from zurini.api_budget import FieldApiBudgetPolicy, build_read_call_budget_evidence
+import pytest
+
+from zurini.api_budget import FieldApiBudgetPolicy, build_read_call_budget_evidence, estimate_index_poll_read_calls
 
 
-def test_field_api_budget_uses_provider_limit_as_ceiling_not_target():
+def test_field_api_budget_expands_reserved_capacity_without_increasing_scouter_speed():
     policy = FieldApiBudgetPolicy(provider_limit_per_second=20)
     normal = policy.window_for(datetime(2026, 5, 11, 10, 0, tzinfo=ZoneInfo("Asia/Seoul")))
 
-    assert normal.total_limit_per_second == 12
+    assert normal.total_limit_per_second == 15
     assert normal.scouter_limit_per_second == 10
-    assert normal.reserved_limit_per_second == 2
+    assert normal.reserved_limit_per_second == 5
 
 
 def test_field_api_budget_reduces_scouter_capacity_in_critical_windows():
@@ -61,11 +63,24 @@ def test_read_call_budget_evidence_uses_measured_peak_not_provider_ceiling():
     )
 
     assert evidence.provider_limit_per_second == 20
-    assert evidence.operating_limit_per_second == 12
+    assert evidence.operating_limit_per_second == 15
+    assert evidence.scouter_limit_per_second == 10
+    assert evidence.reserved_limit_per_second == 5
     assert evidence.measured_read_calls == 42
     assert evidence.measured_peak_per_second == 8
     assert evidence.latency_bucket == "le_250ms"
     assert evidence.within_budget is True
+
+
+def test_index_poll_budget_estimate_for_two_main_indices_at_ten_seconds():
+    assert estimate_index_poll_read_calls(index_count=2, session_minutes=390, poll_interval_seconds=10) == 4680
+
+    with pytest.raises(ValueError, match="poll_interval_seconds"):
+        estimate_index_poll_read_calls(index_count=2, poll_interval_seconds=0)
+
+
+def test_index_poll_budget_estimate_rounds_up_partial_intervals():
+    assert estimate_index_poll_read_calls(index_count=1, session_minutes=1, poll_interval_seconds=45) == 2
 
 
 def test_read_call_budget_evidence_blocks_throttle_or_critical_window_breach():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Any
@@ -26,7 +27,7 @@ class ApiBudgetWindow:
 @dataclass(frozen=True)
 class FieldApiBudgetPolicy:
     provider_limit_per_second: int = 20
-    normal_total_limit_per_second: int = 12
+    normal_total_limit_per_second: int = 15
     normal_scouter_limit_per_second: int = 10
     critical_total_limit_per_second: int = 7
     critical_scouter_limit_per_second: int = 5
@@ -135,6 +136,23 @@ def build_read_call_budget_evidence(
         throttle_flag=throttle_flag,
         within_budget=within_budget,
     )
+
+
+def estimate_index_poll_read_calls(
+    *,
+    index_count: int,
+    session_minutes: int = 390,
+    poll_interval_seconds: int = 10,
+) -> int:
+    if index_count < 0:
+        raise ValueError("index_count must be non-negative")
+    if session_minutes < 0:
+        raise ValueError("session_minutes must be non-negative")
+    if poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive")
+    session_seconds = session_minutes * 60
+    polls_per_index = math.ceil(session_seconds / poll_interval_seconds)
+    return index_count * polls_per_index
 
 
 def _latency_bucket(observed_latency_ms: int | None) -> str:

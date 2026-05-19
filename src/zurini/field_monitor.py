@@ -114,6 +114,10 @@ def build_default_field_dry_run_scenarios() -> tuple[FieldDryRunScenario, ...]:
     )
 
 
+def build_primary_field_dry_run_scenarios() -> tuple[FieldDryRunScenario, ...]:
+    return (build_default_field_dry_run_scenarios()[0],)
+
+
 def build_field_monitor_status(
     *,
     run_id: str,
@@ -124,7 +128,9 @@ def build_field_monitor_status(
     source: str,
     flags: tuple[str, ...] = (),
     api_reports: tuple[dict[str, Any], ...] = (),
+    scenarios: tuple[FieldDryRunScenario, ...] | None = None,
 ) -> FieldDryRunMonitorStatus:
+    selected_scenarios = scenarios or build_default_field_dry_run_scenarios()
     api_snapshot = _api_snapshot_contract(api_reports)
     snapshot_contract = FieldMarketSnapshotContract(
         source=source,
@@ -138,7 +144,7 @@ def build_field_monitor_status(
             str(api_snapshot["note"])
             if api_snapshot
             else
-            "single local snapshot stream is fanned out to primary and shadow engines"
+            "single local snapshot stream is fanned out to configured no-order scenario engines"
             if bars
             else "waiting for approved read-only market-data adapter; no broker/order/account calls"
         ),
@@ -169,7 +175,7 @@ def build_field_monitor_status(
         watch_contract_enabled=watch,
         market_schedule="Korea regular session: pre-open checks, 09:00-15:15 monitor, post-close review",
         snapshot_contract=snapshot_contract,
-        scenarios=build_default_field_dry_run_scenarios(),
+        scenarios=selected_scenarios,
         scenario_results=scenario_results,
         flags=flags,
         next_operator_review="post-close daily review; shadow scenarios are not order authority",
@@ -263,6 +269,7 @@ def write_terminal_field_monitor_status(
     source: str,
     flags: tuple[str, ...] = ("market_session_closed",),
     api_reports: tuple[dict[str, Any], ...] = (),
+    scenarios: tuple[FieldDryRunScenario, ...] | None = None,
 ) -> dict[str, Any]:
     """Mark the monitor terminal without rewriting review/watchlist artifacts."""
 
@@ -279,6 +286,7 @@ def write_terminal_field_monitor_status(
             source=source,
             flags=flags,
             api_reports=api_reports,
+            scenarios=scenarios,
         )
         payload = _json_safe(asdict(status))
 
@@ -300,7 +308,10 @@ def write_terminal_field_monitor_status(
             "flags": terminal_flags,
         }
     )
-    payload.setdefault("scenarios", _json_safe([asdict(item) for item in build_default_field_dry_run_scenarios()]))
+    payload.setdefault(
+        "scenarios",
+        _json_safe([asdict(item) for item in (scenarios or build_default_field_dry_run_scenarios())]),
+    )
     payload.setdefault("scenario_results", [])
     payload.setdefault(
         "snapshot_contract",

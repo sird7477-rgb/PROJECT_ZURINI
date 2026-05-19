@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import sys
 import time
 import tomllib
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -59,6 +60,7 @@ from zurini.dry_run import (
 from zurini.field_monitor import (
     build_default_field_dry_run_scenarios,
     build_field_monitor_status,
+    build_primary_field_dry_run_scenarios,
     write_field_daily_review,
     write_field_monitor_status,
     write_terminal_field_monitor_status,
@@ -72,6 +74,13 @@ from zurini.field_universe import (
     write_kis_symbol_list,
     write_reused_field_universe_artifact,
     write_reused_kis_symbol_list,
+)
+from zurini.index_trend import provider_from_index_bars
+from zurini.kis_index_feed import (
+    build_kis_index_poll_plan,
+    build_kis_index_poll_snapshot,
+    index_bars_from_report,
+    index_samples_from_report,
 )
 from zurini.market import Bar
 from zurini.news_adapter import (
@@ -725,6 +734,8 @@ def _build_parser() -> argparse.ArgumentParser:
     dry_run.add_argument("--local-free-space-gb", help="override local free-space guardrail estimate in GB")
     dry_run.add_argument("--enable-raw-burst", action="store_true", help="enable short-TTL event-window raw burst capture contract")
     dry_run.add_argument("--blacklist", type=Path, help="async blacklist JSON; stale or listed symbols block new entries")
+    dry_run.add_argument("--enable-index-trend-filter", action="store_true", help="block day entries when KOSPI/KOSDAQ trend is missing, stale, or bearish")
+    dry_run.add_argument("--index-trend-report", type=Path, action="append", default=[], help="KIS index poll report for post-close trend-filter simulation")
     dry_run.add_argument("--output", type=Path, default=Path("reports/dry-run/plan-a-session.json"))
 
     dry_run_multi = subparsers.add_parser(
@@ -750,6 +761,8 @@ def _build_parser() -> argparse.ArgumentParser:
     dry_run_multi.add_argument("--local-free-space-gb", help="override local free-space guardrail estimate in GB")
     dry_run_multi.add_argument("--enable-raw-burst", action="store_true", help="enable short-TTL event-window raw burst capture contract")
     dry_run_multi.add_argument("--blacklist", type=Path, help="async blacklist JSON; stale or listed symbols block new entries")
+    dry_run_multi.add_argument("--enable-index-trend-filter", action="store_true", help="block day entries when KOSPI/KOSDAQ trend is missing, stale, or bearish")
+    dry_run_multi.add_argument("--index-trend-report", type=Path, action="append", default=[], help="KIS index poll report for post-close trend-filter simulation")
     dry_run_multi.add_argument("--persist-db", action="store_true", help="persist every no-order dry-run session to the local DB ledger")
     dry_run_multi.add_argument("--output", type=Path, default=Path("reports/dry-run/plan-a-multi-session.json"))
 
@@ -797,6 +810,8 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--api-report", type=Path, action="append", default=[], help="read API smoke/universe report flags into monitor status")
     monitor.add_argument("--blacklist", type=Path, help="async blacklist JSON; stale heartbeat becomes a monitor degradation flag")
     monitor.add_argument("--require-news-feed", action="store_true", help="degrade monitor status when async news/blacklist feed is absent")
+    monitor.add_argument("--enable-index-trend-filter", action="store_true", help="block day-entry scenarios when real-time index trend is unavailable or bearish")
+    monitor.add_argument("--index-trend-report", type=Path, action="append", default=[], help="KIS index poll report used as no-order trend-filter evidence")
     monitor.add_argument("--persist-db", action="store_true", help="persist scenario no-order dry-run ledgers to the local DB")
     _add_market_session_stop_arguments(monitor)
     monitor.add_argument("--output-dir", type=Path, default=Path("reports/dry-run/field-monitor"))
@@ -838,7 +853,7 @@ def _build_parser() -> argparse.ArgumentParser:
     field_run.add_argument("--endpoint-profile", choices=["prod", "paper"], default="prod")
     field_run.add_argument("--rate-profile", choices=["prod", "paper"], default="prod")
     field_run.add_argument("--confirm-prod-readonly", action="store_true")
-    field_run.add_argument("--quote-interval-seconds", help="override KIS quote pacing between symbols")
+    field_run.add_argument("--quote-interval-seconds", help="override KIS quote pacing between read calls")
     field_run.add_argument("--skip-quote-depth", action="store_true", help="diagnostic escape hatch; operating field runs should not use this")
     field_run.add_argument("--market-data-max-age-seconds", type=int, default=120)
     field_run.add_argument("--api-rate-limit-per-second", type=int, default=20)
@@ -846,6 +861,10 @@ def _build_parser() -> argparse.ArgumentParser:
     field_run.add_argument("--enable-raw-burst", action="store_true")
     field_run.add_argument("--blacklist", type=Path)
     field_run.add_argument("--require-news-feed", action="store_true")
+    field_run.add_argument("--enable-index-trend-filter", action="store_true")
+    field_run.add_argument("--index-poll-interval-seconds", type=int, default=10)
+    field_run.add_argument("--index-report", type=Path, default=Path("reports/dry-run/kis-index-trend.json"))
+    field_run.add_argument("--index-trend-report", type=Path, action="append", default=[], help="additional post-close/index trend reports to pass into monitor")
     field_run.add_argument("--persist-db", action="store_true")
     field_run.add_argument("--cycle-limit", type=int, help="bounded cycle count for tests or planned finite runs")
     field_run.add_argument("--quote-degraded-retry-limit", type=int, default=3, help="fail closed after this many consecutive degraded quote/depth cycles")
@@ -1788,6 +1807,14 @@ def run_plan_a_dry_run_command(args: argparse.Namespace) -> int:
     trading_date = datetime.strptime(args.trading_date, "%Y-%m-%d").date()
     bars = _load_dry_run_bars(args)
     blacklist_snapshot = load_async_blacklist(args.blacklist) if args.blacklist else None
+    _validate_index_trend_reports_for_simulation(
+        args.index_trend_report,
+        enabled=args.enable_index_trend_filter,
+    )
+    index_provider = _index_trend_provider_from_reports(
+        args.index_trend_report,
+        enabled=args.enable_index_trend_filter,
+    )
     if bars:
         report = run_plan_a_historical_dry_run(
             bars,
@@ -1798,6 +1825,8 @@ def run_plan_a_dry_run_command(args: argparse.Namespace) -> int:
             local_free_space_gb=_local_free_space_gb(args.local_free_space_gb, args.output),
             raw_burst_enabled=args.enable_raw_burst,
             blacklist_snapshot=blacklist_snapshot,
+            index_trend_filter_enabled=args.enable_index_trend_filter,
+            index_trend_provider=index_provider,
         )
     else:
         report = build_empty_plan_a_dry_run_report(
@@ -1825,6 +1854,14 @@ def run_plan_a_dry_run_command(args: argparse.Namespace) -> int:
 def run_plan_a_dry_run_multi_command(args: argparse.Namespace) -> int:
     bars = _load_dry_run_bars(args, require_input=True)
     blacklist_snapshot = load_async_blacklist(args.blacklist) if args.blacklist else None
+    _validate_index_trend_reports_for_simulation(
+        args.index_trend_report,
+        enabled=args.enable_index_trend_filter,
+    )
+    index_provider = _index_trend_provider_from_reports(
+        args.index_trend_report,
+        enabled=args.enable_index_trend_filter,
+    )
     report = run_plan_a_multi_session_dry_run(
         bars,
         run_id=args.run_id,
@@ -1834,6 +1871,8 @@ def run_plan_a_dry_run_multi_command(args: argparse.Namespace) -> int:
         local_free_space_gb=_local_free_space_gb(args.local_free_space_gb, args.output),
         raw_burst_enabled=args.enable_raw_burst,
         blacklist_snapshot=blacklist_snapshot,
+        index_trend_filter_enabled=args.enable_index_trend_filter,
+        index_trend_provider=index_provider,
     )
     write_multi_session_dry_run_report(report, args.output)
     persisted_events = None
@@ -1895,6 +1934,7 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
     }
     if duplicate_live_reports:
         raise ValueError("do not pass the same KIS artifact as both --market-data-report and --api-report")
+    scenarios = _field_monitor_scenarios_for_args(args)
     blacklist_snapshot = load_async_blacklist(args.blacklist) if args.blacklist else None
     stop_guard = _market_session_stop_guard(args)
     if stop_guard is not None:
@@ -1913,12 +1953,18 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
                         require_news_feed=args.require_news_feed,
                         now=_parse_guard_now(args.now) if args.now else None,
                     ),
+                    *_index_trend_report_flags(
+                        args.index_trend_report,
+                        enabled=args.enable_index_trend_filter,
+                        max_age_seconds=args.market_data_max_age_seconds,
+                        now=_parse_guard_now(args.now) if args.now else None,
+                    ),
                 )
             )
         )
         review_day = _parse_date(stop_guard["session_date"])
         review_path = args.output_dir / "daily-review" / f"{review_day.isoformat()}.md"
-        api_payloads = tuple(_api_report_payloads([*args.api_report, *args.market_data_report, *args.quote_depth_report]))
+        api_payloads = tuple(_api_report_payloads([*args.api_report, *args.market_data_report, *args.quote_depth_report, *args.index_trend_report]))
         payload = write_terminal_field_monitor_status(
             output=args.status_output,
             run_id=args.run_id,
@@ -1926,6 +1972,7 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
             source=args.source,
             flags=flags,
             api_reports=api_payloads,
+            scenarios=scenarios,
         )
         if not review_path.exists():
             status = build_field_monitor_status(
@@ -1937,6 +1984,7 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
                 source=args.source,
                 flags=flags,
                 api_reports=api_payloads,
+                scenarios=scenarios,
             )
             review_path = write_field_daily_review(status, args.output_dir, trading_day=review_day)
         print("mode=no-order")
@@ -1963,10 +2011,16 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
                     require_news_feed=args.require_news_feed,
                     now=_parse_guard_now(args.now) if args.now else None,
                 ),
+                *_index_trend_report_flags(
+                    args.index_trend_report,
+                    enabled=args.enable_index_trend_filter,
+                    max_age_seconds=args.market_data_max_age_seconds,
+                    now=_parse_guard_now(args.now) if args.now else None,
+                ),
             )
         )
     )
-    api_payloads = tuple(_api_report_payloads([*args.api_report, *args.market_data_report, *args.quote_depth_report]))
+    api_payloads = tuple(_api_report_payloads([*args.api_report, *args.market_data_report, *args.quote_depth_report, *args.index_trend_report]))
     if _has_input_contract_degradation(input_flags):
         status = build_field_monitor_status(
             run_id=args.run_id,
@@ -1977,6 +2031,7 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
             source=args.source,
             flags=input_flags,
             api_reports=api_payloads,
+            scenarios=scenarios,
         )
         write_field_monitor_status(status, args.status_output)
         review_path = write_field_daily_review(status, args.output_dir)
@@ -1991,12 +2046,20 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
         print(f"daily_review={review_path}")
         return 1
 
-    warmup_bars = _load_dry_run_bars(args, require_input=False)
     market_bars = (
         _bars_from_market_data_reports(args.market_data_report, quote_depth_reports=args.quote_depth_report)
         if args.market_data_report
         else []
     )
+    warmup_args = args
+    if market_bars and not getattr(args, "symbol_filter", None):
+        warmup_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "symbol_filter": list(dict.fromkeys(bar.symbol for bar in market_bars)),
+            }
+        )
+    warmup_bars = _load_dry_run_bars(warmup_args, require_input=False)
     if market_bars:
         replay_bars = _bars_from_watchlist_history(
             args.output_dir,
@@ -2010,8 +2073,12 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
     else:
         bars = warmup_bars
     blacklist_snapshot = load_async_blacklist(args.blacklist) if args.blacklist else None
+    index_provider = _index_trend_provider_from_reports(
+        args.index_trend_report,
+        enabled=args.enable_index_trend_filter,
+    )
     reports = {}
-    for scenario in build_default_field_dry_run_scenarios():
+    for scenario in scenarios:
         if not bars:
             continue
         report = run_plan_a_multi_session_dry_run(
@@ -2023,6 +2090,8 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
             local_free_space_gb=_local_free_space_gb(args.local_free_space_gb, args.output_dir),
             raw_burst_enabled=args.enable_raw_burst,
             blacklist_snapshot=blacklist_snapshot,
+            index_trend_filter_enabled=args.enable_index_trend_filter,
+            index_trend_provider=index_provider,
         )
         scenario_path = args.output_dir / "scenarios" / f"{scenario.scenario_id}.json"
         write_multi_session_dry_run_report(report, scenario_path)
@@ -2041,6 +2110,7 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
         source=args.source,
         flags=input_flags,
         api_reports=api_payloads,
+        scenarios=scenarios,
     )
     write_field_monitor_status(status, args.status_output)
     review_path = write_field_daily_review(
@@ -2070,6 +2140,12 @@ def run_field_dry_run_monitor_command(args: argparse.Namespace) -> int:
         print(f"watchlist_full={watchlist_paths[0]}")
         print(f"watchlist_summary={watchlist_paths[1]}")
     return 0
+
+
+def _field_monitor_scenarios_for_args(args: argparse.Namespace):
+    if getattr(args, "command", "") == "field-run":
+        return build_primary_field_dry_run_scenarios()
+    return build_default_field_dry_run_scenarios()
 
 
 def run_field_run_command(args: argparse.Namespace) -> int:
@@ -2193,7 +2269,7 @@ def run_field_run_command(args: argparse.Namespace) -> int:
         stop_guard = _market_session_stop_guard(args)
         if stop_guard is not None:
             if _field_run_should_wait_for_market_open(args, stop_guard):
-                wait_seconds = _field_run_wait_seconds(stop_guard, maximum=30)
+                wait_seconds = _field_run_wait_seconds(stop_guard)
                 _write_field_run_control(
                     args,
                     cycle_count=cycle_count,
@@ -2266,9 +2342,15 @@ def run_field_run_command(args: argparse.Namespace) -> int:
             if args.run_network
             else build_kis_read_only_universe_plan(symbols=cycle_symbols)
         )
+        quote_payload = _field_run_quote_payload_with_operational_exclusions(
+            quote_payload,
+            max_age_seconds=args.market_data_max_age_seconds,
+            now=_parse_guard_now(args.now) if args.now else None,
+        )
         args.quote_report.parent.mkdir(parents=True, exist_ok=True)
         args.quote_report.write_text(json.dumps(quote_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+        index_reports = list(args.index_trend_report)
         quote_status = str(quote_payload.get("status") or "unknown")
         degraded_symbols = _field_run_degraded_symbols_from_quote_payload(quote_payload)
         print(
@@ -2281,6 +2363,7 @@ def run_field_run_command(args: argparse.Namespace) -> int:
             consecutive_degraded_quote_cycles += 1
             cycle_count += 1
             retry_exhausted = consecutive_degraded_quote_cycles >= args.quote_degraded_retry_limit
+            _write_field_run_degraded_quote_status(args, quote_payload)
             _write_field_run_control(
                 args,
                 cycle_count=cycle_count,
@@ -2355,6 +2438,46 @@ def run_field_run_command(args: argparse.Namespace) -> int:
             _field_run_degraded_quote_backoff(args)
             continue
 
+        if args.enable_index_trend_filter:
+            print(
+                f"field_run_stage=index_poll_start cycle={cycle_count + 1} "
+                f"run_network={str(args.run_network).lower()} index_report={args.index_report}",
+                flush=True,
+            )
+            index_payload = (
+                build_kis_index_poll_snapshot(
+                    poll_interval_seconds=args.index_poll_interval_seconds,
+                    endpoint_profile=args.endpoint_profile,
+                    auth_cooldown_path=auth_cooldown_path,
+                    confirm_prod_readonly=args.confirm_prod_readonly,
+                    token_cache=token_cache,
+                ).as_dict()
+                if args.run_network
+                else build_kis_index_poll_plan(poll_interval_seconds=args.index_poll_interval_seconds)
+            )
+            index_payload = _index_payload_with_accumulated_bars(
+                [*args.index_trend_report, args.index_report],
+                index_payload,
+            )
+            args.index_report.parent.mkdir(parents=True, exist_ok=True)
+            args.index_report.write_text(json.dumps(index_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            index_reports.append(args.index_report)
+            if args.persist_db and str(index_payload.get("status") or "") == "passed":
+                with db.workflow_lock():
+                    db.apply_schema()
+                    db.insert_index_ticks(
+                        index_samples_from_report(index_payload),
+                        poll_interval_seconds=args.index_poll_interval_seconds,
+                        source_run_id=str(getattr(args, "run_id", None) or "field-run"),
+                    )
+                    db.insert_index_bars(index_bars_from_report(index_payload))
+            print(
+                f"field_run_stage=index_poll_done cycle={cycle_count + 1} "
+                f"status={index_payload.get('status', 'unknown')} "
+                f"read_call_count={index_payload.get('read_call_count', 0)} index_report={args.index_report}",
+                flush=True,
+            )
+
         consecutive_degraded_quote_cycles = 0
         print(
             f"field_run_stage=monitor_start cycle={cycle_count + 1} "
@@ -2382,6 +2505,8 @@ def run_field_run_command(args: argparse.Namespace) -> int:
             api_report=[],
             blacklist=args.blacklist,
             require_news_feed=args.require_news_feed,
+            enable_index_trend_filter=args.enable_index_trend_filter,
+            index_trend_report=index_reports,
             persist_db=args.persist_db,
             enforce_market_session_stop=args.enforce_market_session_stop,
             market_session_date=args.market_session_date,
@@ -2467,12 +2592,8 @@ def _wait_for_field_run_token_prewarm(args: argparse.Namespace) -> None:
         if prewarm_guard is None:
             return
         prewarm_at = datetime.fromisoformat(prewarm_guard["prewarm_at"])
-        wait_seconds = min(30, max(1, int((prewarm_at - normalize_to_kst(datetime.now().astimezone())).total_seconds())))
-        print(
-            f"field_run_stage=token_prewarm_wait_until target={prewarm_guard['prewarm_at']} wait_seconds={wait_seconds}",
-            flush=True,
-        )
-        time.sleep(wait_seconds)
+        _field_run_sleep_until(prewarm_at, stage="token_prewarm_wait_until")
+
 
 def _field_run_should_wait_for_market_open(args: argparse.Namespace, stop_guard: dict[str, str]) -> bool:
     return (
@@ -2482,16 +2603,33 @@ def _field_run_should_wait_for_market_open(args: argparse.Namespace, stop_guard:
     )
 
 
-def _field_run_wait_seconds(stop_guard: dict[str, str], *, maximum: int) -> int:
+def _field_run_sleep_until(target: datetime, *, stage: str) -> None:
+    while True:
+        now = normalize_to_kst(datetime.now().astimezone())
+        remaining = (normalize_to_kst(target) - now).total_seconds()
+        if remaining <= 0:
+            return
+        wait_seconds = max(1, math.ceil(remaining))
+        print(
+            f"field_run_stage={stage} target={normalize_to_kst(target).isoformat()} wait_seconds={wait_seconds}",
+            flush=True,
+        )
+        time.sleep(wait_seconds)
+
+
+def _field_run_wait_seconds(stop_guard: dict[str, str], *, now: datetime | None = None) -> int:
     start_at_raw = stop_guard.get("start_at")
     if start_at_raw:
         try:
             start_at = datetime.fromisoformat(start_at_raw)
-            remaining = int((start_at - normalize_to_kst(datetime.now().astimezone())).total_seconds())
-            return min(maximum, max(1, remaining))
+            reference_now = normalize_to_kst(now or datetime.now().astimezone())
+            open_wake_at = normalize_to_kst(start_at) - timedelta(seconds=30)
+            target = open_wake_at if reference_now < open_wake_at else normalize_to_kst(start_at)
+            remaining = math.ceil((target - reference_now).total_seconds())
+            return max(1, remaining)
         except ValueError:
             pass
-    return maximum
+    return 30
 
 
 def _field_run_degraded_quote_backoff(args: argparse.Namespace) -> None:
@@ -2567,6 +2705,143 @@ def _field_run_degraded_symbols_from_quote_payload(payload: dict[str, object]) -
             }
         )
     return degraded
+
+
+def _field_run_quote_payload_with_operational_exclusions(
+    payload: dict[str, object],
+    *,
+    max_age_seconds: int | None,
+    now: datetime | None,
+) -> dict[str, object]:
+    if payload.get("status") != "degraded":
+        return payload
+    budget_evidence = payload.get("budget_evidence")
+    if isinstance(budget_evidence, dict) and budget_evidence.get("within_budget") is False:
+        return payload
+    api_flags = [str(flag) for flag in payload.get("api_flags", []) if flag]
+    allowed_top_level_flags = {"bid_ask_placeholder"}
+    if any(flag not in allowed_top_level_flags for flag in api_flags):
+        return payload
+    members = payload.get("members")
+    if not isinstance(members, list):
+        return payload
+    excluded_members: list[dict[str, object]] = []
+    kept_members: list[dict[str, object]] = []
+    member_degradation_flags: set[str] = set()
+    for member in members:
+        if not isinstance(member, dict):
+            kept_members.append(member)
+            continue
+        flags = [str(flag) for flag in member.get("field_data_flags", []) if flag]
+        member_degradation_flags.update(flags)
+        if (
+            bool(member.get("included"))
+            and flags == ["bid_ask_placeholder"]
+            and _field_run_placeholder_exclusion_contract_valid(
+                member,
+                max_age_seconds=max_age_seconds,
+                now=now,
+            )
+        ):
+            excluded_members.append(member)
+        else:
+            kept_members.append(member)
+    if any(flag != "bid_ask_placeholder" for flag in member_degradation_flags):
+        return payload
+    if not excluded_members:
+        return payload
+    clean_included = [
+        member
+        for member in kept_members
+        if isinstance(member, dict) and member.get("included") and not member.get("field_data_flags")
+    ]
+    if not clean_included:
+        return payload
+    transformed = dict(payload)
+    transformed["status"] = "passed"
+    transformed["api_flags"] = []
+    transformed["members"] = kept_members
+    transformed["included_symbols"] = [
+        str(member.get("symbol") or "")
+        for member in clean_included
+        if str(member.get("symbol") or "")
+    ]
+    existing_excluded = list(payload.get("excluded_symbols", []) or [])
+    quote_depth_excluded = [
+        {
+            "symbol": str(member.get("symbol") or ""),
+            "reason": "bid_ask_placeholder",
+            "price_observed_at": str(member.get("price_observed_at") or ""),
+            "depth_observed_at": str(member.get("depth_observed_at") or ""),
+            "paired_snapshot_gap_seconds": str(member.get("paired_snapshot_gap_seconds") or ""),
+        }
+        for member in excluded_members
+        if str(member.get("symbol") or "")
+    ]
+    transformed["excluded_symbols"] = [
+        *existing_excluded,
+        *[
+            [item["symbol"], "quote depth placeholder excluded from current no-order monitor cycle"]
+            for item in quote_depth_excluded
+        ],
+    ]
+    transformed["quote_depth_excluded_symbols"] = quote_depth_excluded
+    transformed["input_contract_action"] = "excluded_bid_ask_placeholder_symbols"
+    return transformed
+
+
+def _field_run_placeholder_exclusion_contract_valid(
+    member: dict[str, object],
+    *,
+    max_age_seconds: int | None,
+    now: datetime | None,
+) -> bool:
+    observed_at = str(member.get("observed_at") or member.get("timestamp") or "")
+    price_observed_at = str(member.get("price_observed_at") or "")
+    depth_observed_at = str(member.get("depth_observed_at") or "")
+    gap_value = str(member.get("paired_snapshot_gap_seconds") or "")
+    if not observed_at or not price_observed_at or not depth_observed_at or not gap_value:
+        return False
+    try:
+        parsed_observed_at = _parse_market_timestamp(observed_at)
+        parsed_price_at = _parse_market_timestamp(price_observed_at)
+        parsed_depth_at = _parse_market_timestamp(depth_observed_at)
+        reported_gap = float(gap_value)
+    except (TypeError, ValueError):
+        return False
+    if max_age_seconds is not None:
+        reference_now = normalize_to_kst(now or datetime.now().astimezone())
+        age_seconds = (reference_now - parsed_observed_at).total_seconds()
+        if age_seconds < -60 or age_seconds > max_age_seconds:
+            return False
+    computed_gap = abs((parsed_depth_at - parsed_price_at).total_seconds())
+    return not (reported_gap > 5.0 or computed_gap > 5.0 or abs(reported_gap - computed_gap) > 1.0)
+
+
+def _write_field_run_degraded_quote_status(args: argparse.Namespace, quote_payload: dict[str, object]) -> None:
+    flags = tuple(
+        dict.fromkeys(
+            _api_report_flags(
+                [args.quote_report],
+                max_age_seconds=args.market_data_max_age_seconds,
+                now=_parse_guard_now(args.now) if args.now else None,
+            )
+            if args.quote_report.exists()
+            else tuple(str(flag) for flag in quote_payload.get("api_flags", []))
+        )
+    )
+    status = build_field_monitor_status(
+        run_id=args.run_id,
+        bars=[],
+        reports={},
+        output_dir=args.output_dir,
+        watch=True,
+        source=args.source,
+        flags=flags,
+        api_reports=(quote_payload,),
+        scenarios=build_primary_field_dry_run_scenarios(),
+    )
+    write_field_monitor_status(status, args.status_output)
 
 
 def _prepare_field_run_universe(
@@ -2783,6 +3058,7 @@ def _validate_field_run_warmup_sources(
     target_date: date,
     required_symbols: tuple[str, ...],
 ) -> None:
+    required_symbol_set = {_normalize_kis_symbol(item) for item in required_symbols if item}
     paths = _field_universe_csv_paths(
         list(args.path or []),
         list(args.root or []),
@@ -2790,6 +3066,12 @@ def _validate_field_run_warmup_sources(
         target_date=target_date,
         latest_months=getattr(args, "latest_months", None),
     )
+    if required_symbol_set:
+        paths = tuple(
+            path
+            for path in paths
+            if (_symbol_from_kis_daily_bar_path(path) or _normalize_kis_symbol(path.stem)) in required_symbol_set
+        )
     expected_prior_date = _field_universe_expected_prior_date(args, target_date)
     bars = load_prior_daily_bars_from_minute_csvs(
         paths,
@@ -2809,7 +3091,7 @@ def _validate_field_run_warmup_sources(
         raise ValueError("field-run reusable universe warm-up source produced no prior trading dates")
     missing_symbols = sorted(
         symbol
-        for symbol in {_normalize_kis_symbol(item) for item in required_symbols if item}
+        for symbol in required_symbol_set
         if symbol not in dates_by_symbol
     )
     if missing_symbols:
@@ -2818,7 +3100,7 @@ def _validate_field_run_warmup_sources(
             f"symbols={','.join(missing_symbols)}"
         )
     for symbol, trading_dates in sorted(dates_by_symbol.items()):
-        if required_symbols and symbol not in {_normalize_kis_symbol(item) for item in required_symbols if item}:
+        if required_symbol_set and symbol not in required_symbol_set:
             continue
         if len(trading_dates) < args.min_prior_trading_days:
             raise ValueError(
@@ -3093,12 +3375,12 @@ def _classify_daily_bar_collection_scope(
 ) -> tuple[tuple[str, ...], dict[date, tuple[str, ...]]]:
     full_symbols: list[str] = []
     incremental_symbols_by_start: dict[date, list[str]] = {}
+    prior_dates_by_symbol = _existing_kis_daily_bar_dates_by_symbol(
+        output_root,
+        target_date=target_date,
+    )
     for symbol in symbols:
-        prior_dates = _existing_kis_daily_bar_dates(
-            output_root,
-            symbol=symbol,
-            target_date=target_date,
-        )
+        prior_dates = prior_dates_by_symbol.get(symbol, set())
         missing_expected_dates = tuple(
             trading_date
             for trading_date in expected_trading_dates
@@ -3118,6 +3400,36 @@ def _classify_daily_bar_collection_scope(
         start_date: tuple(grouped_symbols)
         for start_date, grouped_symbols in incremental_symbols_by_start.items()
     }
+
+
+def _existing_kis_daily_bar_dates_by_symbol(output_root: Path, *, target_date: date) -> dict[str, set[date]]:
+    dates_by_symbol: dict[str, set[date]] = {}
+    for path in sorted(output_root.glob("*/*.csv")):
+        symbol = _symbol_from_kis_daily_bar_path(path)
+        if symbol is None:
+            continue
+        try:
+            with path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    raw_date = str(row.get("date") or "").strip()
+                    if len(raw_date) != 8 or not raw_date.isdigit():
+                        continue
+                    trading_date = datetime.strptime(raw_date, "%Y%m%d").date()
+                    if trading_date < target_date:
+                        dates_by_symbol.setdefault(symbol, set()).add(trading_date)
+        except OSError:
+            continue
+    return dates_by_symbol
+
+
+def _symbol_from_kis_daily_bar_path(path: Path) -> str | None:
+    stem = path.stem
+    if not stem.startswith("A"):
+        return None
+    symbol = stem[1:]
+    if not symbol:
+        return None
+    return _normalize_kis_symbol(symbol)
 
 
 def _existing_kis_daily_bar_dates(output_root: Path, *, symbol: str, target_date: date) -> set[date]:
@@ -3232,8 +3544,20 @@ def _merge_kis_daily_bar_collection_results(
         excluded_symbols.append([symbol, reason])
     for symbol in missing_refresh_symbols:
         excluded_symbols.append([symbol, "daily bar refresh failed or was not accepted"])
-    clean_components = bool(statuses) and all(status == "passed" for status in statuses)
-    clean_refresh = not missing_refresh_symbols and not diagnostic_flags
+    full_symbol_set = set(full_symbols)
+    missing_full_symbols = sorted(symbol for symbol in missing_refresh_symbols if symbol in full_symbol_set)
+    missing_incremental_symbols = sorted(symbol for symbol in missing_refresh_symbols if symbol not in full_symbol_set)
+    tolerable_full_exclusions = _tolerable_full_refresh_daily_bar_exclusions(
+        missing_full_symbols,
+        excluded_symbols=excluded_symbols,
+    )
+    clean_components = bool(statuses) and (
+        all(status == "passed" for status in statuses)
+        or (tolerable_full_exclusions and all(status in {"passed", "failed", "degraded"} for status in statuses))
+    )
+    clean_refresh = not missing_incremental_symbols and (
+        not diagnostic_flags or tolerable_full_exclusions
+    )
     status = "passed" if accepted_symbols and clean_components and clean_refresh else "failed"
     return {
         "status": status,
@@ -3253,6 +3577,36 @@ def _merge_kis_daily_bar_collection_results(
         "start_date": min(start_dates) if start_dates else None,
         "end_date": max(end_dates) if end_dates else None,
     }
+
+
+def _tolerable_full_refresh_daily_bar_exclusions(
+    missing_full_symbols: list[str],
+    *,
+    excluded_symbols: list[object],
+) -> bool:
+    if not missing_full_symbols:
+        return False
+    reasons_by_symbol: dict[str, list[str]] = {}
+    for row in excluded_symbols:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        symbol = str(row[0] or "")
+        reason = str(row[1] or "")
+        if symbol:
+            reasons_by_symbol.setdefault(symbol, []).append(reason)
+    for symbol in missing_full_symbols:
+        reasons = reasons_by_symbol.get(symbol, [])
+        if not reasons or not any(_is_tolerable_daily_bar_exclusion(reason) for reason in reasons):
+            return False
+    return True
+
+
+def _is_tolerable_daily_bar_exclusion(reason: str) -> bool:
+    normalized = reason.lower()
+    return (
+        "insufficient kis daily rows" in normalized
+        or "schema mismatch: missing output2" in normalized
+    )
 
 
 def _dedupe_symbol_reason_rows(rows: list[object]) -> list[object]:
@@ -3415,6 +3769,13 @@ def _load_dry_run_bars(args: argparse.Namespace, *, require_input: bool = False)
             raise ValueError("dry-run CSV input is required for this command")
         return []
     paths = _csv_paths(args.path, args.root, args.path_list)
+    symbol_filter = {
+        _normalize_report_symbol(str(symbol))
+        for symbol in (getattr(args, "symbol_filter", None) or [])
+        if str(symbol).strip()
+    }
+    if symbol_filter:
+        paths = [path for path in paths if _normalize_report_symbol(path.stem) in symbol_filter]
     if args.limit_files is not None:
         if args.limit_files <= 0:
             raise ValueError("limit-files must be positive")
@@ -3441,12 +3802,15 @@ def _combine_field_monitor_bars(
     combined: dict[tuple[datetime, str], Bar] = {}
     for bar in warmup_bars:
         if bar.timestamp < market_cutoff:
-            combined[(bar.timestamp, bar.symbol)] = bar
+            symbol = _normalize_report_symbol(bar.symbol)
+            combined[(bar.timestamp, symbol)] = replace(bar, symbol=symbol)
     for bar in replay_bars:
         if bar.timestamp < market_cutoff:
-            combined[(bar.timestamp, bar.symbol)] = bar
+            symbol = _normalize_report_symbol(bar.symbol)
+            combined[(bar.timestamp, symbol)] = replace(bar, symbol=symbol)
     for bar in market_bars:
-        combined[(bar.timestamp, bar.symbol)] = bar
+        symbol = _normalize_report_symbol(bar.symbol)
+        combined[(bar.timestamp, symbol)] = replace(bar, symbol=symbol)
     return sorted(combined.values(), key=lambda item: (item.timestamp, item.symbol))
 
 
@@ -4000,19 +4364,136 @@ def _has_input_contract_degradation(flags: tuple[str, ...]) -> bool:
         or flag.startswith("invalid_market_timestamp")
         or flag.startswith("market_data_stale:")
         or flag.startswith("market_data_future_timestamp:")
+        or flag == "index_trend_missing"
+        or flag == "index_trend_failed"
+        or flag == "index_trend_no_bars"
+        or flag == "index_trend_stale"
+        or flag == "index_trend_future_timestamp"
+        or flag.startswith("index_trend_api:")
+        or flag.startswith("index_trend_missing:")
+        or flag.startswith("index_trend_stale:")
+        or flag.startswith("index_trend_future_timestamp:")
         or flag in {"market_data_missing_fresh_timestamp", "market_data_future_timestamp", "market_data_stale"}
         for flag in flags
     )
 
 
+def _index_trend_provider_from_reports(paths: list[Path], *, enabled: bool):
+    if not enabled:
+        return None
+    bars: list[Bar] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        bars.extend(index_bars_from_report(payload))
+    return provider_from_index_bars(bars)
+
+
+def _validate_index_trend_reports_for_simulation(paths: list[Path], *, enabled: bool) -> None:
+    flags = _index_trend_report_flags(
+        paths,
+        enabled=enabled,
+        max_age_seconds=0,
+        enforce_freshness=False,
+    )
+    if _has_input_contract_degradation(flags):
+        raise ValueError(f"index trend report contract invalid: {','.join(flags)}")
+
+
+def _index_payload_with_accumulated_bars(paths: list[Path], current_payload: dict[str, object]) -> dict[str, object]:
+    bars_by_key: dict[tuple[str, datetime], Bar] = {}
+    for path in paths:
+        if path.exists():
+            for bar in index_bars_from_report(json.loads(path.read_text(encoding="utf-8"))):
+                bars_by_key[(bar.symbol, normalize_to_kst(bar.timestamp))] = bar
+    for bar in index_bars_from_report(current_payload):
+        bars_by_key[(bar.symbol, normalize_to_kst(bar.timestamp))] = bar
+    payload = dict(current_payload)
+    payload["bars"] = [_index_bar_payload(bar) for bar in sorted(bars_by_key.values(), key=lambda item: (item.timestamp, item.symbol))]
+    return payload
+
+
+def _index_bar_payload(bar: Bar) -> dict[str, object]:
+    return {
+        "symbol": bar.symbol,
+        "timestamp": bar.timestamp.isoformat(),
+        "open": str(bar.open),
+        "high": str(bar.high),
+        "low": str(bar.low),
+        "close": str(bar.close),
+        "volume": bar.volume,
+        "value": str(bar.value),
+        "source": bar.source,
+    }
+
+
+def _index_trend_report_flags(
+    paths: list[Path],
+    *,
+    enabled: bool,
+    max_age_seconds: int,
+    now: datetime | None = None,
+    enforce_freshness: bool = True,
+    required_index_codes: tuple[str, ...] = ("KOSPI", "KOSDAQ"),
+) -> tuple[str, ...]:
+    if not enabled:
+        return ()
+    if not paths:
+        return ("index_trend_missing",)
+    flags: list[str] = []
+    reference = normalize_to_kst(now or datetime.now().astimezone())
+    bar_count = 0
+    latest_by_code: dict[str, datetime] = {}
+    for path in paths:
+        if not path.exists():
+            flags.append("index_trend_missing")
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") not in ("passed", "ready"):
+            flags.append("index_trend_failed")
+        flags.extend(f"index_trend_api:{flag}" for flag in payload.get("api_flags", []) if flag)
+        bars = index_bars_from_report(payload)
+        bar_count += len(bars)
+        for bar in bars:
+            timestamp = normalize_to_kst(bar.timestamp)
+            if bar.symbol in required_index_codes and (
+                bar.symbol not in latest_by_code or timestamp > latest_by_code[bar.symbol]
+            ):
+                latest_by_code[bar.symbol] = timestamp
+    if bar_count == 0:
+        flags.append("index_trend_no_bars")
+    for code in required_index_codes:
+        latest_timestamp = latest_by_code.get(code)
+        if latest_timestamp is None:
+            flags.append(f"index_trend_missing:{code}")
+            continue
+        if not enforce_freshness:
+            continue
+        age_seconds = (reference - latest_timestamp).total_seconds()
+        if age_seconds > max_age_seconds:
+            flags.append(f"index_trend_stale:{code}:{int(age_seconds)}s")
+        if age_seconds < -1:
+            flags.append(f"index_trend_future_timestamp:{code}:{latest_timestamp.isoformat()}")
+    return tuple(dict.fromkeys(flags))
+
+
 def _api_report_payloads(paths: list[Path]) -> list[dict[str, object]]:
-    return [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    payloads: list[dict[str, object]] = []
+    for path in paths:
+        if path.exists():
+            payloads.append(json.loads(path.read_text(encoding="utf-8")))
+        else:
+            payloads.append({"status": "missing", "path": str(path), "api_flags": ["report_missing"]})
+    return payloads
 
 
 def _bars_from_market_data_reports(paths: list[Path], *, quote_depth_reports: list[Path] | None = None) -> list[Bar]:
     bars: list[Bar] = []
     quote_depth_by_symbol = _quote_depth_by_symbol(quote_depth_reports or [])
     for path in paths:
+        if not path.exists():
+            continue
         payload = json.loads(path.read_text(encoding="utf-8"))
         for member in payload.get("members", []):
             if not member.get("included"):
@@ -4036,7 +4517,7 @@ def _bars_from_market_data_reports(paths: list[Path], *, quote_depth_reports: li
             )
             bars.append(
                 Bar(
-                    symbol=f"A{symbol}" if symbol.isdigit() and len(symbol) == 6 else symbol,
+                    symbol=_normalize_report_symbol(symbol),
                     timestamp=observed_at,
                     open=open_price,
                     high=max(high_price, open_price, price),
@@ -4119,10 +4600,8 @@ def _kis_quote_interval(args: argparse.Namespace) -> float:
     else:
         field_budget = FieldApiBudgetPolicy().window_for(datetime.now().astimezone())
         field_limit = min(field_budget.total_limit_per_second, field_budget.scouter_limit_per_second)
-        calls_per_symbol = 1 if getattr(args, "skip_quote_depth", False) else 2
         call_budget_after_token = max(1, field_limit - 1)
-        symbol_starts_per_second = max(1, call_budget_after_token // calls_per_symbol)
-        interval = 0.5 if args.rate_profile == "paper" else max(0.3, 1 / symbol_starts_per_second)
+        interval = 0.5 if args.rate_profile == "paper" else max(0.3, 1 / call_budget_after_token)
     if interval < 0:
         raise ValueError("quote-interval-seconds must be non-negative")
     return interval

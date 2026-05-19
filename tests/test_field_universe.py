@@ -315,7 +315,7 @@ def test_build_daily_field_universe_cli_reuses_valid_standby_artifact(tmp_path):
             "--standby-artifact",
             str(standby),
             "--max-standby-artifact-age-minutes",
-            "10000",
+            "20000",
             "--kis-symbol-list-output",
             str(symbol_list),
             "--output",

@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from zurini.index_trend import IndexTrendDecision, IndexTrendProvider
 from zurini.market import Bar, SignalIntent
 
 
@@ -14,6 +15,8 @@ class RiskState:
     nasdaq_future_return: Decimal | None = Decimal("0")
     blacklist_updated_at: datetime | None = None
     blacklisted_symbols: frozenset[str] = frozenset()
+    index_trend_filter_enabled: bool = False
+    index_trend_provider: IndexTrendProvider | None = None
 
     def beta_multiplier(self) -> Decimal:
         if self.nasdaq_future_return is None:
@@ -40,6 +43,23 @@ class RiskState:
         if bar.timestamp - self.blacklist_updated_at > timedelta(minutes=5):
             return "risk-block:stale-blacklist-heartbeat"
         return "risk-block:unknown"
+
+    def index_trend_decision(self, bar: Bar) -> IndexTrendDecision | None:
+        if not self.index_trend_filter_enabled:
+            return None
+        if self.index_trend_provider is None:
+            return IndexTrendDecision(allowed=False, reason="index-trend-missing")
+        return self.index_trend_provider(bar.timestamp, bar.symbol)
+
+    def allows_day_entry_by_index_trend(self, bar: Bar) -> bool:
+        decision = self.index_trend_decision(bar)
+        return True if decision is None else decision.allowed
+
+    def index_trend_block_reason(self, bar: Bar) -> str:
+        decision = self.index_trend_decision(bar)
+        if decision is None or decision.allowed:
+            return "risk-block:index-trend-allowed"
+        return f"risk-block:{decision.reason}"
 
 
 class VwapFirstPullbackStrategy:

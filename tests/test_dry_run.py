@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,9 +14,12 @@ from zurini import field_monitor
 from zurini.cli import (
     _bars_from_watchlist_history,
     _classify_daily_bar_collection_scope,
+    _field_run_quote_payload_with_operational_exclusions,
+    _field_run_wait_seconds,
     _local_free_space_gb,
     _merge_kis_daily_bar_collection_results,
     main,
+    run_field_dry_run_monitor_command,
 )
 from zurini.blacklist import AsyncBlacklistEntry, AsyncBlacklistSnapshot
 from zurini.dry_run import (
@@ -63,6 +67,19 @@ class _RiskAwareEntryStrategy:
         return SignalIntent(action="buy", weight=Decimal("1"), reason="risk-aware-entry", group="day")
 
 
+def _bar(symbol: str, timestamp: datetime, price: Decimal = Decimal("100")) -> Bar:
+    return Bar(
+        symbol=symbol,
+        timestamp=timestamp,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=1000,
+        value=price * Decimal("1000"),
+    )
+
+
 def test_strategy_warmup_diagnostics_do_not_flag_universe_filter_only_rows():
     rows = [
         {
@@ -79,6 +96,73 @@ def test_strategy_warmup_diagnostics_do_not_flag_universe_filter_only_rows():
     assert diagnostics["flags"] == []
     assert diagnostics["max_prior_sessions"] == 0
     assert diagnostics["universe_filter_latest_count"] == 1
+
+
+def test_field_run_wait_targets_market_open_final_wake_window():
+    stop_guard = {
+        "reason": "market-session-not-open",
+        "start_at": "2026-05-18T09:00:00+09:00",
+    }
+
+    assert _field_run_wait_seconds(
+        stop_guard,
+        now=datetime(2026, 5, 18, 8, 58, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+    ) == 90
+    assert _field_run_wait_seconds(
+        stop_guard,
+        now=datetime(2026, 5, 18, 8, 59, 45, tzinfo=ZoneInfo("Asia/Seoul")),
+    ) == 15
+
+
+def test_field_run_waiting_path_records_market_open_wake_target(tmp_path, monkeypatch):
+    control_output = tmp_path / "field-run-control.json"
+    sleep_calls: list[int | float] = []
+
+    class StopAfterFirstWait(Exception):
+        pass
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            frozen = datetime(2026, 5, 18, 8, 58, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+            return frozen.astimezone(tz) if tz else frozen
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        raise StopAfterFirstWait
+
+    monkeypatch.setattr("zurini.cli.datetime", FrozenDateTime)
+    monkeypatch.setattr("zurini.cli.time.sleep", fake_sleep)
+
+    with pytest.raises(StopAfterFirstWait):
+        main(
+            [
+                "field-run",
+                "--run-id",
+                "market-open-wait-main-path",
+                "--symbol",
+                "005930",
+                "--market-session-date",
+                "2026-05-18",
+                "--enforce-market-session-stop",
+                "--control-output",
+                str(control_output),
+                "--quote-report",
+                str(tmp_path / "kis-readonly-universe.json"),
+                "--status-output",
+                str(tmp_path / "current-status.json"),
+                "--output-dir",
+                str(tmp_path / "monitor"),
+            ]
+        )
+
+    control_payload = json.loads(control_output.read_text(encoding="utf-8"))
+    assert sleep_calls == [90]
+    assert control_payload["status"] == "waiting"
+    assert control_payload["quote_status"] == "skipped"
+    assert control_payload["cycle_count"] == 0
+    assert control_payload["extra"]["stop_guard"]["reason"] == "market-session-not-open"
+    assert control_payload["extra"]["wait_seconds"] == 90
 
 
 def test_strategy_warmup_diagnostics_flag_warming_up_rows():
@@ -598,6 +682,178 @@ def test_field_dry_run_monitor_combines_csv_warmup_with_kis_snapshot(tmp_path):
     assert watchlist_payload["strategy_warmup_diagnostics"]["status"] == "insufficient"
     assert watchlist_payload["strategy_warmup_diagnostics"]["flags"] == ["strategy_warmup_insufficient"]
     assert watchlist_payload["strategy_warmup_diagnostics"]["max_prior_sessions"] == 1
+
+
+def test_field_dry_run_monitor_filters_warmup_to_market_data_symbols(tmp_path):
+    samsung_csv = tmp_path / "A005930.csv"
+    hynix_csv = tmp_path / "A000660.csv"
+    csv_text = "\n".join(
+        [
+            "date,time,open,high,low,close,volume",
+            "20260511,1515,68000,69000,67000,68500,100000",
+        ]
+    ) + "\n"
+    samsung_csv.write_text(csv_text, encoding="utf-8")
+    hynix_csv.write_text(
+        csv_text.replace("68000,69000,67000,68500", "180000,181000,179000,180500"),
+        encoding="utf-8",
+    )
+    market_report = tmp_path / "kis-readonly-universe.json"
+    market_report.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "mode": "network-read-only-prod",
+                "universe_id": "kis-readonly-u1",
+                "symbol_count": 1,
+                "included_symbols": ["005930"],
+                "members": [
+                    {
+                        "symbol": "005930",
+                        "price": "70000",
+                        "open": "69000",
+                        "high": "70500",
+                        "low": "68500",
+                        "volume": "123456",
+                        "traded_value": "8641920000",
+                        "bid_ask_ratio": "2.500000",
+                        "observed_at": "2026-05-12T01:00:00+00:00",
+                        "price_observed_at": "2026-05-12T01:00:00+00:00",
+                        "depth_observed_at": "2026-05-12T01:00:00.250000+00:00",
+                        "paired_snapshot_gap_seconds": "0.250000",
+                        "included": True,
+                        "reason": "read-only quote ok",
+                    }
+                ],
+                "api_flags": [],
+                "read_call_count": 2,
+                "budget_evidence": {"provider": "KIS", "within_budget": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_output = tmp_path / "current-status.json"
+
+    exit_code = main(
+        [
+            "field-dry-run-monitor",
+            "--run-id",
+            "monitor-kis-warmup-filter",
+            "--path",
+            str(samsung_csv),
+            "--path",
+            str(hynix_csv),
+            "--market-data-report",
+            str(market_report),
+            "--now",
+            "2026-05-12T10:01:00+09:00",
+            "--status-output",
+            str(status_output),
+            "--output-dir",
+            str(tmp_path / "monitor"),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(status_output.read_text(encoding="utf-8"))
+    assert payload["snapshot_contract"]["snapshot_count"] == 2
+    watchlist_payload = json.loads(
+        (tmp_path / "monitor" / "watchlist" / "watchlist-full-2026-05-12.json").read_text(encoding="utf-8")
+    )
+    assert {row["symbol"] for row in watchlist_payload["rows"]} == {"005930"}
+
+
+def test_field_run_monitor_executes_primary_only_intraday(tmp_path):
+    csv_path = tmp_path / "A005930.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "date,time,open,high,low,close,volume",
+                "20260511,1515,68000,69000,67000,68500,100000",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    market_report = tmp_path / "kis-readonly-universe.json"
+    market_report.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "mode": "network-read-only-prod",
+                "universe_id": "kis-readonly-u1",
+                "symbol_count": 1,
+                "included_symbols": ["005930"],
+                "members": [
+                    {
+                        "symbol": "005930",
+                        "price": "70000",
+                        "open": "69000",
+                        "high": "70500",
+                        "low": "68500",
+                        "volume": "123456",
+                        "traded_value": "8641920000",
+                        "bid_ask_ratio": "2.500000",
+                        "observed_at": "2026-05-12T01:00:00+00:00",
+                        "price_observed_at": "2026-05-12T01:00:00+00:00",
+                        "depth_observed_at": "2026-05-12T01:00:00.250000+00:00",
+                        "paired_snapshot_gap_seconds": "0.250000",
+                        "included": True,
+                        "reason": "read-only quote ok",
+                    }
+                ],
+                "api_flags": [],
+                "read_call_count": 2,
+                "budget_evidence": {"provider": "KIS", "within_budget": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_output = tmp_path / "current-status.json"
+
+    exit_code = run_field_dry_run_monitor_command(
+        Namespace(
+            command="field-run",
+            run_id="intraday-primary-only",
+            path=[csv_path],
+            root=[],
+            path_list=[],
+            source="daishin-csv",
+            limit_files=None,
+            start_date=None,
+            end_date=None,
+            max_trading_days=None,
+            api_rate_limit_per_second=15,
+            local_free_space_gb=None,
+            enable_raw_burst=False,
+            watch=True,
+            market_data_report=[market_report],
+            market_data_max_age_seconds=120,
+            quote_depth_report=[],
+            api_report=[],
+            blacklist=None,
+            require_news_feed=False,
+            enable_index_trend_filter=False,
+            index_trend_report=[],
+            persist_db=False,
+            enforce_market_session_stop=False,
+            market_session_date=None,
+            market_session_stop_time="15:35",
+            market_session_start_time="09:00",
+            now="2026-05-12T10:01:00+09:00",
+            output_dir=tmp_path / "monitor",
+            status_output=status_output,
+        )
+    )
+
+    assert exit_code == 0
+    payload = json.loads(status_output.read_text(encoding="utf-8"))
+    assert [scenario["scenario_id"] for scenario in payload["scenarios"]] == ["primary-current-seed-1m"]
+    assert [result["scenario_id"] for result in payload["scenario_results"]] == ["primary-current-seed-1m"]
+    scenario_dir = tmp_path / "monitor" / "scenarios"
+    assert (scenario_dir / "primary-current-seed-1m.json").exists()
+    assert not (scenario_dir / "shadow-current-seed-2m.json").exists()
+    assert payload["next_operator_review"] == "post-close daily review; shadow scenarios are not order authority"
 
 
 def test_field_dry_run_monitor_treats_naive_kis_snapshot_timestamp_as_kst(tmp_path):
@@ -1255,6 +1511,309 @@ def test_field_run_fails_closed_after_persistent_quote_degradation(tmp_path, mon
     assert control_payload["monitor_exit_status"] == "skipped"
     assert control_payload["extra"]["consecutive_degraded_quote_cycles"] == 2
     assert control_payload["extra"]["input_contract_action"] == "fail_closed_persistent_degraded_quote"
+
+
+def test_field_run_excludes_bid_ask_placeholder_symbol_and_runs_monitor(tmp_path, monkeypatch):
+    symbol_list = tmp_path / "symbols.txt"
+    symbol_list.write_text("111111\n222222\n", encoding="utf-8")
+    quote_report = tmp_path / "kis-readonly-universe.json"
+    status_output = tmp_path / "current-status.json"
+    control_output = tmp_path / "field-run-control.json"
+    output_dir = tmp_path / "monitor"
+    monitor_args_seen = []
+    token_cache = object()
+
+    def fake_prewarm_kis_token_cache(**kwargs):
+        return token_cache, api_smoke.KisAuthPreflightResult(
+            status="passed",
+            mode="network-read-only-auth-prod",
+            api_flags=(),
+            read_call_count=1,
+            token_present=True,
+            from_cache=False,
+            safety_boundary="read-only test",
+        )
+
+    def fake_build_kis_read_only_universe(**kwargs):
+        return api_smoke.KisReadOnlyUniverseResult(
+            status="degraded",
+            mode="network-read-only-prod",
+            universe_id="kis-readonly-u1",
+            symbol_count=2,
+            included_symbols=("111111", "222222"),
+            excluded_symbols=(),
+            members=(
+                api_smoke.KisUniverseMember(
+                    symbol="111111",
+                    price="119",
+                    included=True,
+                    reason="read-only quote ok",
+                    open="118",
+                    high="120",
+                    low="117",
+                    volume="10000",
+                    traded_value="1190000",
+                    observed_at="2026-05-12T01:00:01+00:00",
+                    price_observed_at="2026-05-12T01:00:01+00:00",
+                    depth_observed_at="2026-05-12T01:00:01.010000+00:00",
+                    paired_snapshot_gap_seconds="0.010000",
+                    ask_volume="1000",
+                    bid_volume="2500",
+                    bid_ask_ratio="2.500000",
+                ),
+                api_smoke.KisUniverseMember(
+                    symbol="222222",
+                    price="220",
+                    included=True,
+                    reason="read-only quote ok",
+                    open="219",
+                    high="221",
+                    low="218",
+                    volume="20000",
+                    traded_value="4400000",
+                    observed_at="2026-05-12T01:00:01+00:00",
+                    price_observed_at="2026-05-12T01:00:01+00:00",
+                    depth_observed_at="2026-05-12T01:00:01.010000+00:00",
+                    paired_snapshot_gap_seconds="0.010000",
+                    field_data_flags=("bid_ask_placeholder",),
+                ),
+            ),
+            api_flags=("bid_ask_placeholder",),
+            read_call_count=4,
+            budget_evidence={
+                "source": "kis-readonly-universe-prod",
+                "within_budget": True,
+                "measured_read_calls": 4,
+            },
+            safety_boundary="read-only test",
+        )
+
+    def fake_monitor_command(args):
+        monitor_args_seen.append(args)
+        return 0
+
+    monkeypatch.setattr("zurini.cli.prewarm_kis_token_cache", fake_prewarm_kis_token_cache)
+    monkeypatch.setattr("zurini.cli.build_kis_read_only_universe", fake_build_kis_read_only_universe)
+    monkeypatch.setattr("zurini.cli.run_field_dry_run_monitor_command", fake_monitor_command)
+
+    assert (
+        main(
+            [
+                "field-run",
+                "--run-id",
+                "placeholder-excluded-runs-monitor",
+                "--symbol-list",
+                str(symbol_list),
+                "--allow-network",
+                "--run-network",
+                "--confirm-prod-readonly",
+                "--cycle-limit",
+                "1",
+                "--now",
+                "2026-05-12T10:01:00+09:00",
+                "--quote-report",
+                str(quote_report),
+                "--status-output",
+                str(status_output),
+                "--control-output",
+                str(control_output),
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+        == 0
+    )
+
+    quote_payload = json.loads(quote_report.read_text(encoding="utf-8"))
+    control_payload = json.loads(control_output.read_text(encoding="utf-8"))
+    assert len(monitor_args_seen) == 1
+    assert quote_payload["status"] == "passed"
+    assert quote_payload["api_flags"] == []
+    assert quote_payload["included_symbols"] == ["111111"]
+    assert quote_payload["quote_depth_excluded_symbols"][0]["symbol"] == "222222"
+    assert quote_payload["input_contract_action"] == "excluded_bid_ask_placeholder_symbols"
+    assert control_payload["status"] == "running"
+    assert control_payload["monitor_exit_status"] == 0
+
+
+def test_field_run_does_not_hide_stale_bid_ask_placeholder_member() -> None:
+    payload = {
+        "status": "degraded",
+        "universe_id": "kis-readonly-u1",
+        "api_flags": ["bid_ask_placeholder"],
+        "budget_evidence": {"source": "kis-readonly-universe-prod", "within_budget": True},
+        "members": [
+            {
+                "symbol": "111111",
+                "included": True,
+                "price": "119",
+                "open": "118",
+                "high": "120",
+                "low": "117",
+                "volume": "10000",
+                "traded_value": "1190000",
+                "bid_ask_ratio": "2.500000",
+                "observed_at": "2026-05-12T01:00:01+00:00",
+                "price_observed_at": "2026-05-12T01:00:01+00:00",
+                "depth_observed_at": "2026-05-12T01:00:01.010000+00:00",
+                "paired_snapshot_gap_seconds": "0.010000",
+                "field_data_flags": [],
+            },
+            {
+                "symbol": "222222",
+                "included": True,
+                "price": "220",
+                "open": "219",
+                "high": "221",
+                "low": "218",
+                "volume": "20000",
+                "traded_value": "4400000",
+                "observed_at": "2026-05-12T00:55:00+00:00",
+                "price_observed_at": "2026-05-12T00:55:00+00:00",
+                "depth_observed_at": "2026-05-12T00:55:00.010000+00:00",
+                "paired_snapshot_gap_seconds": "0.010000",
+                "field_data_flags": ["bid_ask_placeholder"],
+            },
+        ],
+    }
+
+    transformed = _field_run_quote_payload_with_operational_exclusions(
+        payload,
+        max_age_seconds=120,
+        now=datetime(2026, 5, 12, 10, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+    )
+
+    assert transformed["status"] == "degraded"
+    assert transformed["api_flags"] == ["bid_ask_placeholder"]
+
+
+def test_field_run_fails_closed_for_placeholder_when_budget_is_over_limit(tmp_path, monkeypatch):
+    symbol_list = tmp_path / "symbols.txt"
+    symbol_list.write_text("111111\n222222\n", encoding="utf-8")
+    quote_report = tmp_path / "kis-readonly-universe.json"
+    status_output = tmp_path / "current-status.json"
+    control_output = tmp_path / "field-run-control.json"
+    output_dir = tmp_path / "monitor"
+    monitor_args_seen = []
+    token_cache = object()
+
+    def fake_prewarm_kis_token_cache(**kwargs):
+        return token_cache, api_smoke.KisAuthPreflightResult(
+            status="passed",
+            mode="network-read-only-auth-prod",
+            api_flags=(),
+            read_call_count=1,
+            token_present=True,
+            from_cache=False,
+            safety_boundary="read-only test",
+        )
+
+    def fake_build_kis_read_only_universe(**kwargs):
+        return api_smoke.KisReadOnlyUniverseResult(
+            status="degraded",
+            mode="network-read-only-prod",
+            universe_id="kis-readonly-u1",
+            symbol_count=2,
+            included_symbols=("111111", "222222"),
+            excluded_symbols=(),
+            members=(
+                api_smoke.KisUniverseMember(
+                    symbol="111111",
+                    price="119",
+                    included=True,
+                    reason="read-only quote ok",
+                    open="118",
+                    high="120",
+                    low="117",
+                    volume="10000",
+                    traded_value="1190000",
+                    observed_at="2026-05-12T01:00:01+00:00",
+                    price_observed_at="2026-05-12T01:00:01+00:00",
+                    depth_observed_at="2026-05-12T01:00:01.010000+00:00",
+                    paired_snapshot_gap_seconds="0.010000",
+                    ask_volume="1000",
+                    bid_volume="2500",
+                    bid_ask_ratio="2.500000",
+                ),
+                api_smoke.KisUniverseMember(
+                    symbol="222222",
+                    price="220",
+                    included=True,
+                    reason="read-only quote ok",
+                    open="219",
+                    high="221",
+                    low="218",
+                    volume="20000",
+                    traded_value="4400000",
+                    observed_at="2026-05-12T01:00:01+00:00",
+                    price_observed_at="2026-05-12T01:00:01+00:00",
+                    depth_observed_at="2026-05-12T01:00:01.010000+00:00",
+                    paired_snapshot_gap_seconds="0.010000",
+                    field_data_flags=("bid_ask_placeholder",),
+                ),
+            ),
+            api_flags=("bid_ask_placeholder",),
+            read_call_count=4,
+            budget_evidence={
+                "source": "kis-readonly-universe-prod",
+                "within_budget": False,
+                "measured_read_calls": 4,
+                "measured_peak_per_second": 8,
+                "operating_limit_per_second": 7,
+                "scouter_limit_per_second": 5,
+            },
+            safety_boundary="read-only test",
+        )
+
+    def fake_monitor_command(args):
+        monitor_args_seen.append(args)
+        return 0
+
+    monkeypatch.setattr("zurini.cli.prewarm_kis_token_cache", fake_prewarm_kis_token_cache)
+    monkeypatch.setattr("zurini.cli.build_kis_read_only_universe", fake_build_kis_read_only_universe)
+    monkeypatch.setattr("zurini.cli.run_field_dry_run_monitor_command", fake_monitor_command)
+
+    assert (
+        main(
+            [
+                "field-run",
+                "--run-id",
+                "placeholder-excluded-budget-warning-runs-monitor",
+                "--symbol-list",
+                str(symbol_list),
+                "--allow-network",
+                "--run-network",
+                "--confirm-prod-readonly",
+                "--cycle-limit",
+                "1",
+                "--now",
+                "2026-05-12T10:01:00+09:00",
+                "--quote-report",
+                str(quote_report),
+                "--status-output",
+                str(status_output),
+                "--control-output",
+                str(control_output),
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+        == 1
+    )
+
+    quote_payload = json.loads(quote_report.read_text(encoding="utf-8"))
+    control_payload = json.loads(control_output.read_text(encoding="utf-8"))
+    status_payload = json.loads(status_output.read_text(encoding="utf-8"))
+    assert len(monitor_args_seen) == 0
+    assert quote_payload["status"] == "degraded"
+    assert quote_payload["api_flags"] == ["bid_ask_placeholder"]
+    assert "quote_depth_excluded_symbols" not in quote_payload
+    assert control_payload["status"] == "failed"
+    assert control_payload["monitor_exit_status"] == "skipped"
+    assert control_payload["extra"]["input_contract_action"] == "fail_closed_degraded_quote_cycle_limit"
+    assert status_payload["status"] == "api_degraded"
+    assert "rate_limit_risk" in status_payload["flags"]
+    assert status_payload["scenario_results"] == []
 
 
 def test_field_run_marks_degraded_quote_cycle_limit_as_failed(tmp_path, monkeypatch):
@@ -2352,6 +2911,114 @@ def test_field_run_rejects_partial_incremental_daily_bar_collection(tmp_path, mo
     assert not (reports_dir / "accepted-prior-warmup-paths-2026-05-12.txt").exists()
     assert control_payload["status"] == "failed"
     assert "KIS daily-bar collection failed" in control_payload["extra"]["universe_error"]
+
+
+def test_daily_bar_merge_accepts_explicit_full_refresh_eligibility_exclusions():
+    payload = _merge_kis_daily_bar_collection_results(
+        [
+            {
+                "status": "failed",
+                "start_date": "2026-01-15",
+                "end_date": "2026-05-15",
+                "symbol_count": 2,
+                "included_symbols": [],
+                "excluded_symbols": [
+                    ["000010", "schema mismatch: missing output2"],
+                    ["279570", "insufficient KIS daily rows: 50 < 60"],
+                ],
+                "api_flags": ["api_schema_mismatch"],
+                "members": [
+                    {"symbol": "000010", "included": False, "reason": "schema mismatch: missing output2", "rows": []},
+                    {"symbol": "279570", "included": False, "reason": "insufficient KIS daily rows: 50 < 60", "rows": []},
+                ],
+                "read_call_count": 2,
+            },
+            {
+                "status": "passed",
+                "start_date": "2026-05-15",
+                "end_date": "2026-05-15",
+                "symbol_count": 2,
+                "included_symbols": ["111111", "222222"],
+                "excluded_symbols": [],
+                "api_flags": [],
+                "members": [
+                    {"symbol": "111111", "included": True, "reason": "ok", "rows": [{"trading_date": "2026-05-15"}]},
+                    {"symbol": "222222", "included": True, "reason": "ok", "rows": [{"trading_date": "2026-05-15"}]},
+                ],
+                "read_call_count": 2,
+            },
+        ],
+        current_symbols=(),
+        full_symbols=("000010", "279570"),
+        incremental_symbols=("111111", "222222"),
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["api_flags"] == []
+    assert payload["diagnostic_api_flags"] == ["api_schema_mismatch"]
+    assert payload["included_symbols"] == ["111111", "222222"]
+    assert ["000010", "schema mismatch: missing output2"] in payload["excluded_symbols"]
+    assert ["279570", "insufficient KIS daily rows: 50 < 60"] in payload["excluded_symbols"]
+
+
+def test_daily_bar_merge_rejects_incremental_refresh_failures():
+    payload = _merge_kis_daily_bar_collection_results(
+        [
+            {
+                "status": "failed",
+                "start_date": "2026-05-15",
+                "end_date": "2026-05-15",
+                "symbol_count": 1,
+                "included_symbols": [],
+                "excluded_symbols": [["111111", "api timeout"]],
+                "api_flags": ["api_timeout"],
+                "members": [{"symbol": "111111", "included": False, "reason": "api timeout", "rows": []}],
+                "read_call_count": 1,
+            }
+        ],
+        current_symbols=("222222",),
+        full_symbols=(),
+        incremental_symbols=("111111",),
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["api_flags"] == ["api_timeout"]
+    assert ["111111", "daily bar refresh failed or was not accepted"] in payload["excluded_symbols"]
+
+
+def test_daily_bar_merge_rejects_untolerated_full_refresh_failures():
+    payload = _merge_kis_daily_bar_collection_results(
+        [
+            {
+                "status": "failed",
+                "start_date": "2026-01-15",
+                "end_date": "2026-05-15",
+                "symbol_count": 1,
+                "included_symbols": [],
+                "excluded_symbols": [["000010", "api timeout"]],
+                "api_flags": ["api_timeout"],
+                "members": [{"symbol": "000010", "included": False, "reason": "api timeout", "rows": []}],
+                "read_call_count": 1,
+            },
+            {
+                "status": "passed",
+                "start_date": "2026-05-15",
+                "end_date": "2026-05-15",
+                "symbol_count": 1,
+                "included_symbols": ["111111"],
+                "excluded_symbols": [],
+                "api_flags": [],
+                "members": [{"symbol": "111111", "included": True, "reason": "ok", "rows": [{"trading_date": "2026-05-15"}]}],
+                "read_call_count": 1,
+            },
+        ],
+        current_symbols=(),
+        full_symbols=("000010",),
+        incremental_symbols=("111111",),
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["api_flags"] == ["api_timeout"]
 
 
 def test_field_run_auto_collects_only_missing_prior_gap_when_history_exists(tmp_path, monkeypatch):

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from zurini.api_budget import FieldApiBudgetPolicy, normalize_to_kst
 from zurini.blacklist import AsyncBlacklistSnapshot
+from zurini.index_trend import IndexTrendProvider
 from zurini.market import Bar, SignalIntent
 from zurini.strategies.baseline import IntradayMomentumSwingSupportPortfolioStrategy, RiskState
 
@@ -633,6 +634,8 @@ def run_plan_a_historical_dry_run(
     blacklist_snapshot: AsyncBlacklistSnapshot | None = None,
     strategies_by_symbol: dict[Any, Any] | None = None,
     strategy_scope: str = "",
+    index_trend_filter_enabled: bool = False,
+    index_trend_provider: IndexTrendProvider | None = None,
 ) -> DryRunReport:
     if api_rate_limit_per_second <= 0:
         raise ValueError("api_rate_limit_per_second must be positive")
@@ -689,7 +692,12 @@ def run_plan_a_historical_dry_run(
             if blacklist_snapshot is not None
             else None
         )
-        risk_state = _risk_state_from_blacklist_evaluation(blacklist_evaluation, timestamp=timestamp)
+        risk_state = _risk_state_from_blacklist_evaluation(
+            blacklist_evaluation,
+            timestamp=timestamp,
+            index_trend_filter_enabled=index_trend_filter_enabled,
+            index_trend_provider=index_trend_provider,
+        )
         if _is_lock_step_window(timestamp):
             state.risk_events.append(
                 RiskEvent(
@@ -732,7 +740,11 @@ def run_plan_a_historical_dry_run(
                     )
                     continue
                 strategy_key = (strategy_scope, bar.symbol) if strategy_scope else bar.symbol
-                signal = _strategy_on_bar(strategies[strategy_key], bar, risk_state)
+                signal = _apply_index_trend_filter(
+                    _strategy_on_bar(strategies[strategy_key], bar, risk_state),
+                    bar=bar,
+                    risk=risk_state,
+                )
                 state.scouter_decision_snapshots.append(
                     _scouter_decision_snapshot(
                         bar=bar,
@@ -777,7 +789,11 @@ def run_plan_a_historical_dry_run(
                 continue
 
             strategy_key = (strategy_scope, bar.symbol) if strategy_scope else bar.symbol
-            signal = _strategy_on_bar(strategies[strategy_key], bar, risk_state)
+            signal = _apply_index_trend_filter(
+                _strategy_on_bar(strategies[strategy_key], bar, risk_state),
+                bar=bar,
+                risk=risk_state,
+            )
             if signal.action == "buy" and signal.weight > 0:
                 entry_candidates.append((bar, signal))
             else:
@@ -971,6 +987,8 @@ def run_plan_a_multi_session_dry_run(
     raw_burst_enabled: bool = False,
     strategy_factory: Callable[[], Any] | None = None,
     blacklist_snapshot: AsyncBlacklistSnapshot | None = None,
+    index_trend_filter_enabled: bool = False,
+    index_trend_provider: IndexTrendProvider | None = None,
 ) -> DryRunMultiSessionReport:
     if not bars:
         raise ValueError("multi-session dry-run requires at least one bar")
@@ -1020,6 +1038,8 @@ def run_plan_a_multi_session_dry_run(
             blacklist_snapshot=blacklist_snapshot,
             strategies_by_symbol=strategies_by_symbol,
             strategy_scope=run_id,
+            index_trend_filter_enabled=index_trend_filter_enabled,
+            index_trend_provider=index_trend_provider,
         )
         pnl_snapshot = report.pnl_snapshots[0] if report.pnl_snapshots else _empty_pnl_snapshot(trading_day)
         cash_row = _cash_reconciliation(
@@ -1322,14 +1342,36 @@ def _risk_state_from_blacklist_evaluation(
     blacklist_evaluation: Any | None,
     *,
     timestamp: datetime,
+    index_trend_filter_enabled: bool = False,
+    index_trend_provider: IndexTrendProvider | None = None,
 ) -> RiskState:
     if blacklist_evaluation is None:
-        return RiskState(blacklist_updated_at=timestamp)
+        return RiskState(
+            blacklist_updated_at=timestamp,
+            index_trend_filter_enabled=index_trend_filter_enabled,
+            index_trend_provider=index_trend_provider,
+        )
     active_symbols = set(str(symbol) for symbol in blacklist_evaluation.active_symbols)
     active_symbols.update(f"A{symbol}" for symbol in blacklist_evaluation.active_symbols)
     return RiskState(
         blacklist_updated_at=timestamp if not blacklist_evaluation.stale else timestamp - timedelta(minutes=6),
         blacklisted_symbols=frozenset(active_symbols),
+        index_trend_filter_enabled=index_trend_filter_enabled,
+        index_trend_provider=index_trend_provider,
+    )
+
+
+def _apply_index_trend_filter(signal: SignalIntent, *, bar: Bar, risk: RiskState) -> SignalIntent:
+    if signal.action != "buy" or signal.group != "day":
+        return signal
+    decision = risk.index_trend_decision(bar)
+    if decision is None or decision.allowed:
+        return signal
+    return replace(
+        signal,
+        action="hold",
+        weight=Decimal("0"),
+        reason=f"risk-block:{decision.reason}",
     )
 
 

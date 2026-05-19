@@ -260,9 +260,8 @@ Normal operation must leave reserve capacity because position checks, risk
 checks, order-state reads, and emergency exits need immediate headroom. Baseline
 dry-run policy:
 
-- normal intraday: total REST call budget target is at most 12 calls/second,
-  with the scouter capped at 8-10 calls/second after reserved calls are
-  allocated;
+- normal intraday: total REST call budget target is at most 15 calls/second,
+  with the scouter capped at 10 calls/second after reserved calls are allocated;
 - open burst window, roughly 09:00-09:10: total REST call budget target is at
   most 7 calls/second, with the scouter capped at 5 calls/second until
   opening-gap, survival, and first-risk checks settle;
@@ -500,11 +499,51 @@ diagnostic, and every included member must carry price/depth timestamps with a
 per-symbol gap not exceeding five seconds. A degraded quote-depth artifact is a
 non-zero command result and cannot be promoted as operating evidence.
 
+Current-cycle bid/ask placeholder handling is intentionally narrower than a
+general degraded-input bypass. During main `field-run`, if every degraded member
+has exactly `bid_ask_placeholder` and at least one clean member remains, the run
+may exclude those placeholder symbols from the current cycle and continue with
+the clean members only. The quote report must change to `status=passed`, clear
+top-level `api_flags`, record the excluded members in
+`quote_depth_excluded_symbols`, and set
+`input_contract_action=excluded_bid_ask_placeholder_symbols`. A top-level
+`api_rate_limit_risk` is not diagnostic for operating continuation; it means the
+read-call budget contract was not accepted and the cycle must remain degraded or
+fail closed. Placeholder exclusion is valid only because missing bid/ask
+pressure for an otherwise excluded member is not strategy evidence. It must not
+be used for auth failures, budget/rate-limit pressure, schema errors, stale
+timestamps, future timestamps, paired price/depth gaps, missing prices,
+timeout-heavy collection, or mixed degraded flags; those remain fail-closed or
+degraded-cycle skip conditions.
+
+The 2026-05-18 main run also exposed two pre-split performance constraints that
+are now part of the operating path. Daily-bar source classification must scan
+stored KIS daily CSV files once and group by symbol; it must not perform a
+full filesystem scan per candidate symbol. Reused-universe warm-up validation
+must load only the symbols required by the accepted field universe, not the full
+market-wide accepted daily source list. Field monitor warm-up loading must also
+filter CSV/path-list inputs to the symbols present in the accepted live KIS
+snapshot for that cycle. Large scenario JSON writes on `/mnt/c` can still make
+each monitor cycle slow; treat that as an I/O latency risk to address in the W14
+collection/report split, not as permission to hand-edit artifacts or bypass the
+main module.
+
 When both historical CSV input and `--market-data-report` are supplied,
 `field-dry-run-monitor` now combines prior CSV warm-up bars, replayable prior
 watchlist observations, and the current KIS snapshot stream. This is required
 before a same-day KIS snapshot can be treated as strategy-signal evidence rather
 than a cold-start quote diagnostic.
+
+장중 scenario execution is primary-only. The main `field-run` monitor loop must
+execute `primary-current-seed-1m` only, because that is the operating baseline
+for live no-order continuation decisions. Shadow current-capital, future-capital
+capacity, and slippage-stress scenarios are post-close validation lanes over the
+data acquired during the day. They may run through the analysis/monitor replay
+surface after the session, but they must not consume intraday monitor cycle time
+or appear as 장중 main `field-run` scenario results. If a live `field-run`
+status/control artifact shows shadow scenario results, classify it as an
+operating-sequence defect and stop/restart through the corrected primary-only
+path.
 
 Market-hours monitor launch must therefore include the accepted prior warm-up
 path or path-list and the same stop guard:
@@ -583,13 +622,18 @@ endpoint only after `--confirm-prod-readonly` is supplied. This production
 read-only smoke path is part of the user-approved dry-run infrastructure scope;
 it remains outside broker order, balance, account, real-fill, and live-trading
 authority. `--endpoint-profile paper` uses the mock-server endpoint and
-`KIS_PAPER_*` credentials, and is the CLI default for network calls unless
-`prod` is explicitly requested. The default rate profile is `prod` because
-dry-run promotion targets the field environment, not the stricter mock server. `prod`
-uses the lower internal field budget, currently 12 requests/second, and treats
-20 requests/second as the provider ceiling only. It is not the full scouter
-target during critical windows. `paper` means a 0.5 second quote interval for
-mock-server checks. If a `prod` run
+`KIS_PAPER_*` credentials. `field-run` defaults to `--endpoint-profile prod`
+because the main field dry-run is production read-only market-data evidence,
+but it still cannot issue production read-only calls unless
+`--confirm-prod-readonly` is supplied. The default rate profile is `prod`
+because dry-run promotion targets the field environment, not the stricter mock
+server. `prod`
+uses the lower internal field budget and treats 20 requests/second as the
+provider ceiling only. During critical windows, including 09:00-09:10 and
+15:10-15:20 KST, the scouter request budget is enforced per read call rather
+than per symbol, so price and order-book reads are not allowed to burst as a
+pair. `paper` means a 0.5 second quote interval for mock-server checks. If a
+`prod` run
 returns a throttle message, treat the result as `api_degraded` and classify
 whether the response came from account scope, endpoint scope, credential type,
 token refresh, or an accidental mock-server route. Do not widen production
